@@ -141,6 +141,7 @@ add_executable(MarkReader WIN32
     src/render/text_renderer.cpp
     src/render/doc_layout.cpp
     src/ui/theme.cpp
+    src/ui/source_editor.cpp
     src/ui/main_window.cpp
     resources/app.rc
 )
@@ -181,9 +182,27 @@ add_custom_command(TARGET MarkReader POST_BUILD
 enable_testing()
 add_executable(markreader_tests
     tests/test_markdown.cpp
+    src/ui/source_editor.cpp
+    src/ui/theme.cpp
+    src/render/text_renderer.cpp
+    src/render/image_loader.cpp
+    src/render/d2d_context.cpp
+    src/math/d2d_tex_backend.cpp
 )
 target_include_directories(markreader_tests PRIVATE src)
-target_link_libraries(markreader_tests PRIVATE markreader_core)
+target_link_libraries(markreader_tests PRIVATE
+    markreader_core
+    microtex
+    d3d11
+    dxgi
+    d2d1
+    dwrite
+    windowscodecs
+    winhttp
+    ole32
+    shlwapi
+    uuid
+)
 if (MINGW)
     target_link_options(markreader_tests PRIVATE -static-libgcc -static-libstdc++)
 endif()

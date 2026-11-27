@@ -19,12 +19,16 @@ namespace {
 
 // Normalizes \[ ... \] and \( ... \) math delimiters outside code fences and inline code spans,
 // and collapses blank lines inside standalone $$ ... $$ blocks so MD4C parses multi-line display math cleanly.
-std::string PreprocessMarkdownMath(const std::string& input) {
+// Simultaneously records out_line_map[prep_line] = original 0-based line index.
+static std::string PreprocessMarkdownMathWithLineMap(const std::string& input, std::vector<int>& out_line_map) {
     std::string out;
     out.reserve(input.size() + 64);
+    out_line_map.clear();
+    out_line_map.push_back(0);
 
     size_t i = 0;
     const size_t n = input.size();
+    int orig_line = 0;
     bool in_fence = false;
     char fence_char = 0;
     size_t fence_len = 0;
@@ -33,6 +37,16 @@ std::string PreprocessMarkdownMath(const std::string& input) {
 
     auto is_line_start = [&](size_t pos) {
         return pos == 0 || input[pos - 1] == '\n';
+    };
+
+    auto append_and_track = [&](size_t start, size_t len) {
+        out.append(input, start, len);
+        for (size_t k = 0; k < len; ++k) {
+            if (input[start + k] == '\n') {
+                ++orig_line;
+                out_line_map.push_back(orig_line);
+            }
+        }
     };
 
     while (i < n) {
@@ -64,10 +78,10 @@ std::string PreprocessMarkdownMath(const std::string& input) {
             if (in_fence) {
                 size_t eol = input.find('\n', i);
                 if (eol == std::string::npos) {
-                    out.append(input, i, n - i);
+                    append_and_track(i, n - i);
                     break;
                 }
-                out.append(input, i, eol - i + 1);
+                append_and_track(i, eol - i + 1);
                 i = eol + 1;
                 continue;
             }
@@ -81,33 +95,54 @@ std::string PreprocessMarkdownMath(const std::string& input) {
             if (!in_bracket_display_fence && trimmed == "$$") {
                 in_display_dollar_fence = !in_display_dollar_fence;
                 out.append(line);
-                if (line_end != std::string::npos) out.push_back('\n');
+                if (line_end != std::string::npos) {
+                    out.push_back('\n');
+                    ++orig_line;
+                    out_line_map.push_back(orig_line);
+                }
                 i = (line_end == std::string::npos) ? n : (line_end + 1);
                 continue;
             }
             if (!in_display_dollar_fence && !in_bracket_display_fence && trimmed == "\\[") {
                 in_bracket_display_fence = true;
                 out.append("$$");
-                if (line_end != std::string::npos) out.push_back('\n');
+                if (line_end != std::string::npos) {
+                    out.push_back('\n');
+                    ++orig_line;
+                    out_line_map.push_back(orig_line);
+                }
                 i = (line_end == std::string::npos) ? n : (line_end + 1);
                 continue;
             }
             if (in_bracket_display_fence && trimmed == "\\]") {
                 in_bracket_display_fence = false;
                 out.append("$$");
-                if (line_end != std::string::npos) out.push_back('\n');
+                if (line_end != std::string::npos) {
+                    out.push_back('\n');
+                    ++orig_line;
+                    out_line_map.push_back(orig_line);
+                }
                 i = (line_end == std::string::npos) ? n : (line_end + 1);
                 continue;
             }
             if ((in_display_dollar_fence || in_bracket_display_fence) && trimmed.empty()) {
                 // Skip blank lines inside standalone display math block so MD4C keeps it as one math span
+                if (line_end != std::string::npos) {
+                    ++orig_line;
+                    out_line_map.back() = orig_line;
+                }
                 i = (line_end == std::string::npos) ? n : (line_end + 1);
                 continue;
             }
         }
 
         if (in_fence || in_display_dollar_fence || in_bracket_display_fence) {
-            out.push_back(input[i++]);
+            char ch = input[i++];
+            out.push_back(ch);
+            if (ch == '\n') {
+                ++orig_line;
+                out_line_map.push_back(orig_line);
+            }
             continue;
         }
 
@@ -131,11 +166,11 @@ std::string PreprocessMarkdownMath(const std::string& input) {
                 }
             }
             if (close_pos != std::string::npos) {
-                out.append(input, i, close_pos - i);
+                append_and_track(i, close_pos - i);
                 i = close_pos;
                 continue;
             }
-            out.append(input, i, ticks);
+            append_and_track(i, ticks);
             i += ticks;
             continue;
         }
@@ -165,10 +200,20 @@ std::string PreprocessMarkdownMath(const std::string& input) {
             }
         }
 
-        out.push_back(input[i++]);
+        char ch = input[i++];
+        out.push_back(ch);
+        if (ch == '\n') {
+            ++orig_line;
+            out_line_map.push_back(orig_line);
+        }
     }
 
     return out;
+}
+
+std::string PreprocessMarkdownMath(const std::string& input) {
+    std::vector<int> line_map;
+    return PreprocessMarkdownMathWithLineMap(input, line_map);
 }
 
 std::string AttrToUtf8(const MD_ATTRIBUTE& attr) {
@@ -368,6 +413,14 @@ struct ParseBuilder {
     std::vector<ContainerFrame> stack;
     std::unordered_map<std::string, int> slug_counts;
 
+    const char* prep_beg = nullptr;
+    size_t prep_size = 0;
+    std::vector<size_t> prep_line_starts;
+    std::vector<int> prep_to_orig_line;
+    int last_orig_line = 0;
+    int current_block_line = -1;
+    int current_math_line = -1;
+
     bool in_paragraph_like = false;
     bool in_heading = false;
     bool in_code_block = false;
@@ -385,6 +438,7 @@ struct ParseBuilder {
         SegKind kind = SegKind::Paragraph;
         ParagraphData para;
         std::wstring math_tex;
+        int source_line = -1;
     };
     std::vector<Segment> para_segments;
     std::string active_math_buf;
@@ -398,6 +452,47 @@ struct ParseBuilder {
         ContainerFrame root;
         root.kind = ContainerFrame::Kind::Root;
         stack.push_back(std::move(root));
+    }
+
+    int ResolveOrigLine(const char* ptr) const {
+        if (!prep_beg || !ptr || ptr < prep_beg || ptr > prep_beg + prep_size || prep_line_starts.empty()) {
+            return -1;
+        }
+        size_t off = static_cast<size_t>(ptr - prep_beg);
+        auto it = std::upper_bound(prep_line_starts.begin(), prep_line_starts.end(), off);
+        size_t prep_line = (it == prep_line_starts.begin())
+            ? 0
+            : static_cast<size_t>((it - prep_line_starts.begin()) - 1);
+        if (prep_to_orig_line.empty()) return static_cast<int>(prep_line);
+        if (prep_line >= prep_to_orig_line.size()) return prep_to_orig_line.back();
+        return prep_to_orig_line[prep_line];
+    }
+
+    void StampSourceLine(int line) {
+        if (line < 0) return;
+        last_orig_line = std::max(last_orig_line, line);
+        for (auto& f : stack) {
+            if (f.kind == ContainerFrame::Kind::ListItem) {
+                if (f.list_item.source_line < 0) f.list_item.source_line = line;
+            } else if (f.kind != ContainerFrame::Kind::Root) {
+                if (f.block.source_line < 0) f.block.source_line = line;
+            }
+        }
+        if ((in_heading || in_code_block || in_html_block) && current_block_line < 0) {
+            current_block_line = line;
+        }
+        if (in_table_cell && current_table_row.source_line < 0) {
+            current_table_row.source_line = line;
+        }
+        if (!in_table_cell) {
+            if (style.math_display > 0 && current_math_line < 0) {
+                current_math_line = line;
+            }
+            if (!para_segments.empty() && para_segments.back().kind == SegKind::Paragraph &&
+                para_segments.back().source_line < 0) {
+                para_segments.back().source_line = line;
+            }
+        }
     }
 
     void AppendBlockToParent(Block&& b) {
@@ -423,7 +518,7 @@ struct ParseBuilder {
     ParagraphData& CurrentParagraph() {
         if (in_table_cell) return current_table_cell.content;
         if (para_segments.empty() || para_segments.back().kind != SegKind::Paragraph) {
-            para_segments.push_back({SegKind::Paragraph, {}, {}});
+            para_segments.push_back({SegKind::Paragraph, {}, {}, -1});
         }
         return para_segments.back().para;
     }
@@ -474,11 +569,13 @@ struct ParseBuilder {
 
     void FlushParagraphSegments() {
         for (auto& seg : para_segments) {
+            int seg_line = (seg.source_line >= 0) ? seg.source_line : last_orig_line;
             if (seg.kind == SegKind::DisplayMath) {
                 std::wstring trimmed = Utf8ToWide(TrimAscii(WideToUtf8(seg.math_tex)));
                 if (!trimmed.empty()) {
                     Block mb;
                     mb.kind = Block::Kind::DisplayMath;
+                    mb.source_line = seg_line;
                     mb.math_tex = std::move(trimmed);
                     AppendBlockToParent(std::move(mb));
                 }
@@ -520,6 +617,7 @@ struct ParseBuilder {
                 const InlineRun* img = non_ws_runs[0];
                 Block ib;
                 ib.kind = Block::Kind::Image;
+                ib.source_line = seg_line;
                 ib.image_src = img->url;
                 ib.image_alt = img->text;
                 ib.image_title = img->title;
@@ -531,6 +629,7 @@ struct ParseBuilder {
             FinalizeParagraphPlainText(seg.para);
             Block pb;
             pb.kind = Block::Kind::Paragraph;
+            pb.source_line = seg_line;
             pb.inline_content = std::move(seg.para);
             AppendBlockToParent(std::move(pb));
         }
@@ -607,6 +706,7 @@ int OnEnterBlock(MD_BLOCKTYPE type, void* detail, void* userdata) {
             ContainerFrame f;
             f.kind = ContainerFrame::Kind::BlockQuote;
             f.block.kind = Block::Kind::BlockQuote;
+            f.block.source_line = -1;
             b->stack.push_back(std::move(f));
             break;
         }
@@ -615,6 +715,7 @@ int OnEnterBlock(MD_BLOCKTYPE type, void* detail, void* userdata) {
             ContainerFrame f;
             f.kind = ContainerFrame::Kind::Admonition;
             f.block.kind = Block::Kind::Admonition;
+            f.block.source_line = -1;
             f.block.admonition_kind = det ? ParseAdmonitionKind(AttrToUtf8(det->type)) : AdmonitionKind::Note;
             if (f.block.admonition_kind == AdmonitionKind::None) f.block.admonition_kind = AdmonitionKind::Note;
             b->stack.push_back(std::move(f));
@@ -625,6 +726,7 @@ int OnEnterBlock(MD_BLOCKTYPE type, void* detail, void* userdata) {
             ContainerFrame f;
             f.kind = ContainerFrame::Kind::List;
             f.block.kind = Block::Kind::List;
+            f.block.source_line = -1;
             f.block.list_ordered = false;
             f.block.list_tight = det ? (det->is_tight != 0) : false;
             b->stack.push_back(std::move(f));
@@ -635,6 +737,7 @@ int OnEnterBlock(MD_BLOCKTYPE type, void* detail, void* userdata) {
             ContainerFrame f;
             f.kind = ContainerFrame::Kind::List;
             f.block.kind = Block::Kind::List;
+            f.block.source_line = -1;
             f.block.list_ordered = true;
             f.block.list_start = det ? det->start : 1;
             f.block.list_tight = det ? (det->is_tight != 0) : false;
@@ -645,6 +748,7 @@ int OnEnterBlock(MD_BLOCKTYPE type, void* detail, void* userdata) {
             auto* det = static_cast<MD_BLOCK_LI_DETAIL*>(detail);
             ContainerFrame f;
             f.kind = ContainerFrame::Kind::ListItem;
+            f.list_item.source_line = -1;
             if (det && det->is_task) {
                 f.list_item.is_task = true;
                 f.list_item.task_checked = (det->task_mark == 'x' || det->task_mark == 'X');
@@ -655,6 +759,7 @@ int OnEnterBlock(MD_BLOCKTYPE type, void* detail, void* userdata) {
         case MD_BLOCK_HR: {
             Block hb;
             hb.kind = Block::Kind::ThematicBreak;
+            hb.source_line = b->last_orig_line + 1;
             b->AppendBlockToParent(std::move(hb));
             break;
         }
@@ -662,6 +767,7 @@ int OnEnterBlock(MD_BLOCKTYPE type, void* detail, void* userdata) {
             auto* det = static_cast<MD_BLOCK_H_DETAIL*>(detail);
             b->in_heading = true;
             b->in_paragraph_like = true;
+            b->current_block_line = -1;
             b->current_heading_level = det ? static_cast<int>(det->level) : 1;
             b->para_segments.clear();
             b->style = {};
@@ -676,12 +782,14 @@ int OnEnterBlock(MD_BLOCKTYPE type, void* detail, void* userdata) {
         case MD_BLOCK_CODE: {
             auto* det = static_cast<MD_BLOCK_CODE_DETAIL*>(detail);
             b->in_code_block = true;
+            b->current_block_line = -1;
             b->current_code_lang = det ? TrimAscii(AttrToUtf8(det->lang)) : "";
             b->current_code_buf.clear();
             break;
         }
         case MD_BLOCK_HTML: {
             b->in_html_block = true;
+            b->current_block_line = -1;
             b->current_html_buf.clear();
             break;
         }
@@ -690,6 +798,7 @@ int OnEnterBlock(MD_BLOCKTYPE type, void* detail, void* userdata) {
             ContainerFrame f;
             f.kind = ContainerFrame::Kind::Table;
             f.block.kind = Block::Kind::Table;
+            f.block.source_line = -1;
             f.block.table_cols = det ? det->col_count : 0;
             b->stack.push_back(std::move(f));
             break;
@@ -703,6 +812,7 @@ int OnEnterBlock(MD_BLOCKTYPE type, void* detail, void* userdata) {
         case MD_BLOCK_TR:
             b->current_table_row = {};
             b->current_table_row.is_header = b->current_table_in_head;
+            b->current_table_row.source_line = -1;
             break;
         case MD_BLOCK_TH:
         case MD_BLOCK_TD: {
@@ -718,6 +828,7 @@ int OnEnterBlock(MD_BLOCKTYPE type, void* detail, void* userdata) {
             ContainerFrame f;
             f.kind = ContainerFrame::Kind::FootnoteDef;
             f.block.kind = Block::Kind::FootnoteDef;
+            f.block.source_line = -1;
             f.block.footnote_id = det ? det->id : 0;
             f.block.footnote_label = det ? Utf8ToWide(AttrToUtf8(det->label)) : L"";
             b->stack.push_back(std::move(f));
@@ -737,6 +848,7 @@ int OnLeaveBlock(MD_BLOCKTYPE type, void* /*detail*/, void* userdata) {
         case MD_BLOCK_FOOTNOTE_DEF: {
             if (b->stack.size() > 1) {
                 Block blk = std::move(b->stack.back().block);
+                if (blk.source_line < 0) blk.source_line = b->last_orig_line;
                 b->stack.pop_back();
                 b->AppendBlockToParent(std::move(blk));
             }
@@ -746,6 +858,7 @@ int OnLeaveBlock(MD_BLOCKTYPE type, void* /*detail*/, void* userdata) {
             b->FlushParagraphSegments();
             if (b->stack.size() > 1) {
                 ListItem item = std::move(b->stack.back().list_item);
+                if (item.source_line < 0) item.source_line = b->last_orig_line;
                 b->stack.pop_back();
                 if (!b->stack.empty() && b->stack.back().kind == ContainerFrame::Kind::List) {
                     b->stack.back().block.list_items.push_back(std::move(item));
@@ -758,6 +871,7 @@ int OnLeaveBlock(MD_BLOCKTYPE type, void* /*detail*/, void* userdata) {
         case MD_BLOCK_TABLE: {
             if (b->stack.size() > 1) {
                 Block blk = std::move(b->stack.back().block);
+                if (blk.source_line < 0) blk.source_line = b->last_orig_line;
                 b->stack.pop_back();
                 b->AppendBlockToParent(std::move(blk));
             }
@@ -777,14 +891,16 @@ int OnLeaveBlock(MD_BLOCKTYPE type, void* /*detail*/, void* userdata) {
             std::string unique_slug = (count == 0) ? raw_slug : (raw_slug + "-" + std::to_string(count));
             ++count;
 
+            int src_line = (b->current_block_line >= 0) ? b->current_block_line : b->last_orig_line;
             int hid = static_cast<int>(b->doc.outline.size());
-            b->doc.outline.push_back({b->current_heading_level, hid, para.plain_text, unique_slug});
+            b->doc.outline.push_back({b->current_heading_level, hid, para.plain_text, unique_slug, src_line});
             if (b->doc.doc_title.empty() && b->current_heading_level == 1) {
                 b->doc.doc_title = para.plain_text;
             }
 
             Block hb;
             hb.kind = Block::Kind::Heading;
+            hb.source_line = src_line;
             hb.heading_level = b->current_heading_level;
             hb.heading_id = hid;
             hb.slug = unique_slug;
@@ -806,18 +922,24 @@ int OnLeaveBlock(MD_BLOCKTYPE type, void* /*detail*/, void* userdata) {
                    (b->current_code_buf.back() == '\n' || b->current_code_buf.back() == '\r')) {
                 b->current_code_buf.pop_back();
             }
+            int code_line = (b->current_block_line >= 0) ? b->current_block_line : b->last_orig_line;
+            if (!b->current_code_lang.empty() && code_line > 0) {
+                --code_line;  // Opening ``` fence sits one line above first body token
+            }
             std::string lang_lower = ToLowerAscii(b->current_code_lang);
             if (lang_lower == "math" || lang_lower == "katex") {
                 std::wstring tex = Utf8ToWide(TrimAscii(b->current_code_buf));
                 if (!tex.empty()) {
                     Block mb;
                     mb.kind = Block::Kind::DisplayMath;
+                    mb.source_line = code_line;
                     mb.math_tex = std::move(tex);
                     b->AppendBlockToParent(std::move(mb));
                 }
             } else {
                 Block cb;
                 cb.kind = Block::Kind::CodeBlock;
+                cb.source_line = code_line;
                 cb.code_lang = b->current_code_lang;
                 cb.code_text = Utf8ToWide(b->current_code_buf);
                 cb.code_tokens = HighlightCode(cb.code_text, cb.code_lang);
@@ -834,6 +956,9 @@ int OnLeaveBlock(MD_BLOCKTYPE type, void* /*detail*/, void* userdata) {
             break;
         }
         case MD_BLOCK_TR: {
+            if (b->current_table_row.source_line < 0) {
+                b->current_table_row.source_line = b->last_orig_line;
+            }
             if (!b->stack.empty() && b->stack.back().kind == ContainerFrame::Kind::Table) {
                 b->stack.back().block.table_rows.push_back(std::move(b->current_table_row));
             }
@@ -886,6 +1011,7 @@ int OnEnterSpan(MD_SPANTYPE type, void* detail, void* userdata) {
             break;
         case MD_SPAN_LATEXMATH_DISPLAY:
             b->style.math_display++;
+            b->current_math_line = -1;
             b->active_math_buf.clear();
             break;
         case MD_SPAN_FOOTNOTE_REF: {
@@ -970,7 +1096,8 @@ int OnLeaveSpan(MD_SPANTYPE type, void* /*detail*/, void* userdata) {
                     // Inside table cells or headings, render inline so table/heading geometry stays cohesive.
                     b->AppendTextToCurrentParagraph(tex, InlineRun::Kind::InlineMath);
                 } else {
-                    b->para_segments.push_back({ParseBuilder::SegKind::DisplayMath, {}, std::move(tex)});
+                    int mline = (b->current_math_line >= 0) ? b->current_math_line : b->last_orig_line;
+                    b->para_segments.push_back({ParseBuilder::SegKind::DisplayMath, {}, std::move(tex), mline});
                 }
             }
             break;
@@ -983,6 +1110,10 @@ int OnLeaveSpan(MD_SPANTYPE type, void* /*detail*/, void* userdata) {
 
 int OnText(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, void* userdata) {
     auto* b = static_cast<ParseBuilder*>(userdata);
+    int orig_line = b->ResolveOrigLine(text);
+    if (orig_line >= 0) {
+        b->StampSourceLine(orig_line);
+    }
     if (b->in_code_block) {
         b->current_code_buf.append(text, size);
         return 0;
@@ -1053,7 +1184,16 @@ MarkdownDocument ParseMarkdownDocument(const std::string& utf8_markdown, const s
         builder.doc.doc_title = L"MarkReader";
     }
 
-    std::string preprocessed = PreprocessMarkdownMath(utf8_markdown);
+    std::string preprocessed = PreprocessMarkdownMathWithLineMap(utf8_markdown, builder.prep_to_orig_line);
+    builder.prep_beg = preprocessed.data();
+    builder.prep_size = preprocessed.size();
+    builder.prep_line_starts.clear();
+    builder.prep_line_starts.push_back(0);
+    for (size_t i = 0; i < preprocessed.size(); ++i) {
+        if (preprocessed[i] == '\n') {
+            builder.prep_line_starts.push_back(i + 1);
+        }
+    }
 
     MD_PARSER parser{};
     parser.abi_version = 0;

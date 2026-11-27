@@ -6,6 +6,7 @@
 #include "render/d2d_context.h"
 #include "render/doc_layout.h"
 #include "render/image_loader.h"
+#include "ui/source_editor.h"
 #include "ui/theme.h"
 
 #include <windows.h>
@@ -44,6 +45,7 @@ private:
         D2D1_RECT_F icon_brand{};
         D2D1_RECT_F btn_outline{};
         D2D1_RECT_F btn_open{};
+        D2D1_RECT_F btn_edit{};
         D2D1_RECT_F btn_find{};
         D2D1_RECT_F btn_zoom_out{};
         D2D1_RECT_F btn_zoom_reset{};
@@ -81,7 +83,11 @@ private:
     void OnChar(wchar_t ch);
     void OnImeComposition(LPARAM lparam);
     void UpdateImePosition();
+    void UpdateImeEnablement();
     void SetFindFocused(bool focused);
+    void ToggleEditMode();
+    bool SaveCurrentDocument(bool show_toast = true);
+    bool ConfirmDiscardOrSaveBeforeLeave();
     void OnDropFiles(HDROP hdrop);
     void OnTimer(UINT_PTR id);
 
@@ -123,8 +129,12 @@ private:
     FileWatcher watcher_;
 
     MarkdownDocument doc_;
+    std::string source_utf8_;
     DocumentLayout layout_;
     TextSelection selection_;
+    SourceEditor editor_;
+    bool edit_mode_ = false;
+    bool editor_caret_visible_ = true;
 
     // Navigation history
     std::vector<std::wstring> history_;
@@ -182,6 +192,7 @@ private:
     std::wstring find_query_;
     std::wstring ime_comp_;
     std::vector<SearchMatch> search_matches_;
+    std::vector<EditorFindMatch> editor_find_matches_;
     int active_match_idx_ = -1;
     int hovered_find_btn_ = -1;
 

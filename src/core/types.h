@@ -150,6 +150,7 @@ bool IsWindowsAbsolutePath(const std::wstring& path);
 std::wstring GetExecutableDir();
 
 bool LoadTextFileUtf8(const std::wstring& path, std::string& out_utf8, std::wstring& out_error);
+bool SaveTextFileUtf8(const std::wstring& path, const std::string& utf8, std::wstring& out_error);
 AppConfig LoadAppConfig();
 void SaveAppConfig(const AppConfig& cfg);
 void AddRecentFile(AppConfig& cfg, const std::wstring& path);

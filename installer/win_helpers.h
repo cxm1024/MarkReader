@@ -133,6 +133,17 @@ inline std::wstring RegGetSz(HKEY root, const std::wstring& subkey, const std::w
     return {};
 }
 
+inline bool RegGetDword(HKEY root, const std::wstring& subkey, const std::wstring& name, DWORD& out_val) {
+    DWORD val = 0;
+    DWORD sz = sizeof(val);
+    if (RegGetValueW(root, subkey.c_str(), name.c_str(),
+                     RRF_RT_REG_DWORD, nullptr, &val, &sz) == ERROR_SUCCESS) {
+        out_val = val;
+        return true;
+    }
+    return false;
+}
+
 inline void RegisterAppAndUninstall(
     bool system_wide,
     const std::wstring& install_dir,
@@ -146,7 +157,7 @@ inline void RegisterAppAndUninstall(
     const std::wstring uninst_key = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MarkReader";
 
     RegSetSz(root, uninst_key, L"DisplayName", L"MarkReader");
-    RegSetSz(root, uninst_key, L"DisplayVersion", L"1.0.0");
+    RegSetSz(root, uninst_key, L"DisplayVersion", L"1.1.0");
     RegSetSz(root, uninst_key, L"Publisher", L"MarkReader");
     RegSetSz(root, uninst_key, L"DisplayIcon", app_exe + L",0");
     RegSetSz(root, uninst_key, L"InstallLocation", install_dir);

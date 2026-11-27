@@ -157,4 +157,7 @@ private:
     D2D1_COLOR_F default_color_;
 };
 
+const wchar_t* PickMonoFontFamily(IDWriteFactory5* dw);
+const wchar_t* PickUiFontFamily(IDWriteFactory5* dw);
+
 }  // namespace mr

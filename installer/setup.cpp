@@ -44,11 +44,24 @@ struct InstallOptions {
     bool silent = false;
     bool auto_install = false;
     bool elevated_relaunch = false;
+    bool explicit_dir = false;
+    bool is_upgrade = false;
+    std::wstring existing_version;
 };
 
 struct InstallResult {
     bool ok = false;
     std::wstring error_msg;
+};
+
+struct ExistingInstallInfo {
+    bool found = false;
+    bool system_wide = false;
+    std::wstring install_dir;
+    std::wstring version;
+    bool create_desktop = true;
+    bool create_start_menu = true;
+    bool associate_md = false;
 };
 
 struct InstallerState {
@@ -97,6 +110,38 @@ std::wstring TrimPath(std::wstring p) {
     while (!p.empty() && (p.back() == L' ' || p.back() == L'"')) p.pop_back();
     while (p.size() > 3 && (p.back() == L'\\' || p.back() == L'/')) p.pop_back();
     return p;
+}
+
+ExistingInstallInfo DetectExistingInstall() {
+    ExistingInstallInfo info;
+    const std::wstring uninst_key = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MarkReader";
+    for (HKEY root : {HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE}) {
+        std::wstring loc = TrimPath(mr::inst::RegGetSz(root, uninst_key, L"InstallLocation"));
+        if (!loc.empty() && fs::exists(fs::path(loc) / L"MarkReader.exe")) {
+            info.found = true;
+            info.system_wide = (root == HKEY_LOCAL_MACHINE);
+            info.install_dir = loc;
+            info.version = mr::inst::RegGetSz(root, uninst_key, L"DisplayVersion");
+            std::wstring desk_lnk = mr::inst::RegGetSz(root, uninst_key, L"DesktopShortcut");
+            std::wstring sm_dir = mr::inst::RegGetSz(root, uninst_key, L"StartMenuDir");
+            info.create_desktop = !desk_lnk.empty();
+            info.create_start_menu = !sm_dir.empty();
+            DWORD assoc = 0;
+            if (mr::inst::RegGetDword(root, uninst_key, L"FileAssoc", assoc)) {
+                info.associate_md = (assoc != 0);
+            }
+            return info;
+        }
+    }
+
+    // Fallback: check default directory on disk in case registry metadata is absent
+    std::wstring def = DefaultInstallDir();
+    if (fs::exists(fs::path(def) / L"MarkReader.exe")) {
+        info.found = true;
+        info.system_wide = true;
+        info.install_dir = def;
+    }
+    return info;
 }
 
 bool IsValidInstallDir(const std::wstring& p) {
@@ -192,6 +237,34 @@ InstallResult RunInstallation(
         return {false, L"无法创建安装目录，请检查权限或更换目录。"};
     }
 
+    const fs::path target_app = fs::path(target_dir) / L"MarkReader.exe";
+    const bool upgrading_dir = opts.is_upgrade || fs::exists(target_app);
+
+    // Ensure running target MarkReader.exe is not holding a write lock before unpacking files
+    if (!opts.silent && fs::exists(target_app)) {
+        while (true) {
+            HANDLE hchk = CreateFileW(
+                target_app.c_str(), GENERIC_WRITE, 0, nullptr,
+                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (hchk != INVALID_HANDLE_VALUE) {
+                CloseHandle(hchk);
+                break;
+            }
+            DWORD err = GetLastError();
+            if (err != ERROR_SHARING_VIOLATION && err != ERROR_LOCK_VIOLATION) {
+                break;
+            }
+            int choice = MessageBoxW(
+                progress_hwnd,
+                L"检测到 MarkReader 正在运行，请先关闭所有 MarkReader 窗口后点击“重试”继续更新。",
+                L"MarkReader 更新程序",
+                MB_RETRYCANCEL | MB_ICONWARNING);
+            if (choice != IDRETRY) {
+                return {false, L"已取消更新（MarkReader 仍在运行）。"};
+            }
+        }
+    }
+
     size_t cursor = sizeof(ahdr);
     for (uint32_t i = 0; i < ahdr.file_count; ++i) {
         if (cursor + sizeof(uint32_t) > archive.size()) return {false, L"归档记录损坏。"};
@@ -241,7 +314,7 @@ InstallResult RunInstallation(
         cursor += static_cast<size_t>(file_size);
 
         int pct = 20 + static_cast<int>((static_cast<double>(i + 1) / ahdr.file_count) * 65.0);
-        report(pct, L"正在写入文件...");
+        report(pct, upgrading_dir ? L"正在更新文件..." : L"正在写入文件...");
     }
 
     report(90, L"正在创建快捷方式与注册卸载信息...");
@@ -295,7 +368,7 @@ InstallResult RunInstallation(
         static_cast<DWORD>(std::max<uint64_t>(1, archive.size() / 1024)));
 
     CoUninitialize();
-    report(100, L"安装完成！");
+    report(100, upgrading_dir ? L"更新完成！" : L"安装完成！");
     return {true, L""};
 }
 
@@ -358,10 +431,22 @@ void UpdateElevationShield(InstallerState* s) {
     bool need_admin = !mr::inst::IsProcessElevated() && !mr::inst::CanWriteDirectory(path);
     SendMessageW(s->btn_install, BCM_SETSHIELD, 0, need_admin ? TRUE : FALSE);
 
+    const bool has_existing = fs::exists(fs::path(path) / L"MarkReader.exe");
+    s->opts.is_upgrade = has_existing;
+    if (!s->installing && !s->finished) {
+        SetWindowTextW(s->btn_install, has_existing ? L"立即更新" : L"立即安装");
+        RECT hdr{0, 0, Dip(s, 540), Dip(s, 88)};
+        InvalidateRect(s->hwnd, &hdr, FALSE);
+    }
+
     double mb = static_cast<double>(s->payload_uncompressed_bytes) / (1024.0 * 1024.0);
     int tenths = static_cast<int>(mb * 10.0 + 0.5);
     std::wstring text = L"所需磁盘空间: 约 " + std::to_wstring(tenths / 10) + L"." + std::to_wstring(tenths % 10) + L" MB";
-    if (need_admin) {
+    if (has_existing) {
+        text += need_admin
+            ? L"  （检测到已安装版本，将提权覆盖更新）"
+            : L"  （检测到已安装版本，将直接覆盖更新）";
+    } else if (need_admin) {
         text += L"  （安装到系统目录将请求管理员权限）";
     }
     SetWindowTextW(s->lbl_space, text.c_str());
@@ -522,7 +607,7 @@ LRESULT CALLBACK SetupWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SendMessageW(s->chk_launch, BM_SETCHECK, BST_CHECKED, 0);
 
             s->btn_install = CreateWindowExW(
-                0, L"BUTTON", L"立即安装",
+                0, L"BUTTON", s->opts.is_upgrade ? L"立即更新" : L"立即安装",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                 0, 0, 100, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BTN_INSTALL)), s->hinst, nullptr);
             s->btn_cancel = CreateWindowExW(
@@ -582,12 +667,23 @@ LRESULT CALLBACK SetupWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             HGDIOBJ old_font = SelectObject(hdc, s->font_title);
             SetTextColor(hdc, RGB(30, 41, 59));
             RECT tr{Dip(s, 88), Dip(s, 18), rc.right - Dip(s, 20), Dip(s, 48)};
-            DrawTextW(hdc, s->finished ? L"MarkReader 安装完成" : L"安装 MarkReader", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            const wchar_t* title_txt = s->finished
+                ? (s->opts.is_upgrade ? L"MarkReader 更新完成" : L"MarkReader 安装完成")
+                : (s->opts.is_upgrade ? L"更新 MarkReader" : L"安装 MarkReader");
+            DrawTextW(hdc, title_txt, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
             SelectObject(hdc, s->font_sub);
             SetTextColor(hdc, RGB(100, 116, 139));
             RECT sr{Dip(s, 88), Dip(s, 48), rc.right - Dip(s, 20), Dip(s, 72)};
-            DrawTextW(hdc, L"轻量原生 Markdown 阅读器 · 支持公式、代码块、图片与大纲", -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            std::wstring sub_txt = L"轻量原生 Markdown 阅读器 v1.1.0 · 支持公式、代码块、图片与微调";
+            if (s->opts.is_upgrade && !s->finished) {
+                if (!s->opts.existing_version.empty()) {
+                    sub_txt = L"检测到已安装 v" + s->opts.existing_version + L" · 即将就地升级至 v1.1.0";
+                } else {
+                    sub_txt = L"检测到已安装旧版本 · 即将就地更新至 v1.1.0";
+                }
+            }
+            DrawTextW(hdc, sub_txt.c_str(), -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
             SelectObject(hdc, s->font_bold);
             SetTextColor(hdc, RGB(51, 65, 85));
@@ -703,8 +799,10 @@ InstallOptions ParseCommandLine() {
             opts.elevated_relaunch = true;
         } else if (a.rfind(L"/D=", 0) == 0 || a.rfind(L"/d=", 0) == 0) {
             opts.install_dir = TrimPath(a.substr(3));
+            opts.explicit_dir = true;
         } else if (a.rfind(L"--dir=", 0) == 0) {
             opts.install_dir = TrimPath(a.substr(6));
+            opts.explicit_dir = true;
         } else if (a == L"--desktop=0") {
             opts.create_desktop = false;
         } else if (a == L"--desktop=1") {
@@ -720,6 +818,27 @@ InstallOptions ParseCommandLine() {
         }
     }
     LocalFree(argv);
+
+    ExistingInstallInfo existing = DetectExistingInstall();
+    if (existing.found) {
+        if (!opts.explicit_dir && !existing.install_dir.empty()) {
+            opts.install_dir = existing.install_dir;
+            opts.is_upgrade = true;
+            opts.existing_version = existing.version;
+            if (!opts.elevated_relaunch) {
+                opts.create_desktop = existing.create_desktop;
+                opts.create_start_menu = existing.create_start_menu;
+                opts.associate_md = existing.associate_md;
+            }
+        } else if (opts.explicit_dir &&
+                   _wcsicmp(TrimPath(opts.install_dir).c_str(), TrimPath(existing.install_dir).c_str()) == 0) {
+            opts.is_upgrade = true;
+            opts.existing_version = existing.version;
+        }
+    } else if (opts.explicit_dir && fs::exists(fs::path(opts.install_dir) / L"MarkReader.exe")) {
+        opts.is_upgrade = true;
+    }
+
     return opts;
 }
 

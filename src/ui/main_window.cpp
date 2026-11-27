@@ -30,6 +30,7 @@ constexpr float kOutlineBottomPad = 8.0f;
 enum ToolbarBtnId {
     BTN_OUTLINE = 0,
     BTN_OPEN,
+    BTN_EDIT,
     BTN_FIND,
     BTN_ZOOM_OUT,
     BTN_ZOOM_RESET,
@@ -48,6 +49,12 @@ enum FindBtnId {
 
 enum ContextMenuId {
     CMD_COPY = 1001,
+    CMD_CUT,
+    CMD_PASTE,
+    CMD_UNDO,
+    CMD_REDO,
+    CMD_SAVE,
+    CMD_TOGGLE_EDIT,
     CMD_SELECT_ALL,
     CMD_OPEN_FILE,
     CMD_RELOAD,
@@ -637,21 +644,21 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         case WM_CHAR: {
-            if (find_visible_ && find_focused_) {
+            if ((find_visible_ && find_focused_) || (edit_mode_ && !find_focused_)) {
                 OnChar(static_cast<wchar_t>(wp));
             }
             return 0;
         }
 
         case WM_IME_STARTCOMPOSITION: {
-            if (find_visible_ && find_focused_) {
+            if ((find_visible_ && find_focused_) || (edit_mode_ && !find_focused_)) {
                 UpdateImePosition();
             }
             return DefWindowProcW(hwnd_, msg, wp, lp);
         }
 
         case WM_IME_COMPOSITION: {
-            if (find_visible_ && find_focused_) {
+            if ((find_visible_ && find_focused_) || (edit_mode_ && !find_focused_)) {
                 OnImeComposition(lp);
             }
             return DefWindowProcW(hwnd_, msg, wp, lp);
@@ -666,7 +673,7 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         case WM_IME_NOTIFY: {
-            if (find_visible_ && find_focused_ &&
+            if (((find_visible_ && find_focused_) || (edit_mode_ && !find_focused_)) &&
                 (wp == IMN_OPENCANDIDATE || wp == IMN_CHANGECANDIDATE || wp == IMN_SETCONVERSIONMODE)) {
                 UpdateImePosition();
             }
@@ -684,10 +691,15 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         case WM_ACTIVATE: {
-            if (LOWORD(wp) != WA_INACTIVE && watcher_.HasChanged()) {
+            if (LOWORD(wp) != WA_INACTIVE && watcher_.HasChanged() && !(edit_mode_ && editor_.IsModified())) {
                 ReloadCurrentFile(true);
             }
             return 0;
+        }
+
+        case WM_CLOSE: {
+            if (!ConfirmDiscardOrSaveBeforeLeave()) return 0;
+            break;
         }
 
         case WM_APP_IMAGE_LOADED: {
@@ -702,15 +714,56 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             if (cmd == CMD_COPY) {
                 if (find_visible_ && find_focused_ && !find_query_.empty()) {
                     CopyTextToClipboard(find_query_, L"已复制搜索文本");
+                } else if (edit_mode_ && editor_.HasSelection()) {
+                    CopyTextToClipboard(editor_.GetSelectedText(), L"已复制到剪贴板");
                 } else if (selection_.HasSelection()) {
                     CopyTextToClipboard(layout_.ExtractSelectedText(selection_), L"已复制选中文本");
                 }
+            } else if (cmd == CMD_CUT && edit_mode_ && editor_.HasSelection()) {
+                CopyTextToClipboard(editor_.GetSelectedText(), L"");
+                editor_.DeleteSelection();
+                if (find_visible_ && !find_query_.empty()) RunSearch(find_query_, false);
+                UpdateWindowTitle();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            } else if (cmd == CMD_PASTE && edit_mode_) {
+                std::wstring pasted = ReadTextFromClipboard();
+                if (!pasted.empty()) {
+                    editor_.PasteText(pasted);
+                    if (find_visible_ && !find_query_.empty()) RunSearch(find_query_, false);
+                    UpdateWindowTitle();
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                }
+            } else if (cmd == CMD_UNDO && edit_mode_) {
+                if (editor_.Undo()) {
+                    editor_.EnsureCaretVisible();
+                    if (find_visible_ && !find_query_.empty()) RunSearch(find_query_, false);
+                    UpdateWindowTitle();
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                }
+            } else if (cmd == CMD_REDO && edit_mode_) {
+                if (editor_.Redo()) {
+                    editor_.EnsureCaretVisible();
+                    if (find_visible_ && !find_query_.empty()) RunSearch(find_query_, false);
+                    UpdateWindowTitle();
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                }
+            } else if (cmd == CMD_SAVE && edit_mode_) {
+                SaveCurrentDocument(true);
+            } else if (cmd == CMD_TOGGLE_EDIT) {
+                ToggleEditMode();
             } else if (cmd == CMD_SELECT_ALL) {
-                OnKeyDown('A');
+                if (edit_mode_ && !find_focused_) {
+                    editor_.SelectAll();
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                } else {
+                    OnKeyDown('A');
+                }
             } else if (cmd == CMD_OPEN_FILE) {
                 OpenFileDialog();
             } else if (cmd == CMD_RELOAD) {
-                ReloadCurrentFile(true);
+                if (!edit_mode_ || ConfirmDiscardOrSaveBeforeLeave()) {
+                    ReloadCurrentFile(true);
+                }
             } else if (cmd == CMD_TOGGLE_OUTLINE) {
                 ToggleOutline();
             } else if (cmd == CMD_FIND) {
@@ -728,12 +781,18 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             } else if (cmd == CMD_THEME_SEPIA) {
                 SetTheme(ThemeMode::Sepia);
             } else if (cmd == CMD_WELCOME) {
-                watcher_.Clear();
-                LoadMarkdownString(GetWelcomeMarkdownUtf8(), L"欢迎指南");
+                if (ConfirmDiscardOrSaveBeforeLeave()) {
+                    edit_mode_ = false;
+                    watcher_.Clear();
+                    LoadMarkdownString(GetWelcomeMarkdownUtf8(), L"欢迎指南");
+                    UpdateImeEnablement();
+                }
             } else if (cmd >= CMD_RECENT_BASE && cmd < CMD_RECENT_BASE + 10) {
                 size_t idx = static_cast<size_t>(cmd - CMD_RECENT_BASE);
-                if (idx < config_.recent_files.size()) {
+                if (idx < config_.recent_files.size() && ConfirmDiscardOrSaveBeforeLeave()) {
+                    edit_mode_ = false;
                     OpenFile(config_.recent_files[idx], true);
+                    UpdateImeEnablement();
                 }
             }
             return 0;
@@ -809,6 +868,7 @@ LRESULT MainWindow::OnNcHitTest(POINT screen_pt) const {
         ToolbarHitRects tr = ComputeToolbarButtons(tb);
         if (RectContains(tr.btn_outline, x, y) ||
             RectContains(tr.btn_open, x, y) ||
+            RectContains(tr.btn_edit, x, y) ||
             RectContains(tr.btn_find, x, y) ||
             RectContains(tr.btn_zoom_out, x, y) ||
             RectContains(tr.btn_zoom_reset, x, y) ||
@@ -863,6 +923,8 @@ MainWindow::ToolbarHitRects MainWindow::ComputeToolbarButtons(const D2D1_RECT_F&
     r.btn_outline = D2D1::RectF(lx, y0, lx + 34.0f, y1);
     lx += 40.0f;
     r.btn_open = D2D1::RectF(lx, y0, lx + 56.0f, y1);
+    lx += 62.0f;
+    r.btn_edit = D2D1::RectF(lx, y0, lx + 56.0f, y1);
 
     const float cap_w = 42.0f;
     const float cap_bot = toolbar.bottom - 1.0f;
@@ -916,11 +978,21 @@ void MainWindow::ReloadCurrentFile(bool show_toast) {
     if (!LoadTextFileUtf8(doc_.file_path, utf8, err)) return;
 
     ScrollAnchor anchor = layout_.CaptureScrollAnchor(scroll_y_);
+    int edit_top_line = edit_mode_ ? editor_.GetTopVisibleLine() : 0;
+    source_utf8_ = utf8;
     doc_ = ParseMarkdownDocument(utf8, doc_.file_path);
     selection_.Clear();
     lightbox_image_idx_ = -1;
     RebuildLayout(false);
-    scroll_y_ = target_scroll_y_ = std::clamp(layout_.ResolveScrollAnchor(anchor), 0.0f, MaxDocScrollY());
+    if (edit_mode_) {
+        editor_.SetDocument(source_utf8_);
+        D2D1_RECT_F tb{}, sb{}, sp{}, vp{}, vs{};
+        ComputeRegions(tb, sb, sp, vp, vs);
+        editor_.EnsureLayout(vp, config_.zoom_percent, d2d_.DWrite(), GetThemePalette(config_.theme));
+        editor_.ScrollToLineAtTop(edit_top_line);
+    } else {
+        scroll_y_ = target_scroll_y_ = std::clamp(layout_.ResolveScrollAnchor(anchor), 0.0f, MaxDocScrollY());
+    }
     if (!find_query_.empty()) RunSearch(find_query_, false);
     UpdateWindowTitle();
     if (show_toast) ShowToast(L"文件已重新加载");
@@ -928,10 +1000,14 @@ void MainWindow::ReloadCurrentFile(bool show_toast) {
 }
 
 void MainWindow::LoadMarkdownString(const std::string& utf8, const std::wstring& virtual_title, const std::wstring& real_path) {
+    edit_mode_ = false;
+    source_utf8_ = utf8;
     doc_ = ParseMarkdownDocument(utf8, real_path);
     if (!virtual_title.empty() && real_path.empty()) {
         doc_.doc_title = virtual_title;
     }
+    editor_.SetDocument(source_utf8_);
+    editor_find_matches_.clear();
     selection_.Clear();
     lightbox_image_idx_ = -1;
     scroll_y_ = 0.0f;
@@ -946,13 +1022,15 @@ void MainWindow::LoadMarkdownString(const std::string& utf8, const std::wstring&
         search_matches_.clear();
         active_match_idx_ = -1;
     }
+    UpdateImeEnablement();
     UpdateWindowTitle();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void MainWindow::UpdateWindowTitle() {
     if (!hwnd_) return;
-    std::wstring title = doc_.doc_title.empty() ? L"MarkReader" : (doc_.doc_title + L" — MarkReader");
+    std::wstring base = doc_.doc_title.empty() ? L"MarkReader" : (doc_.doc_title + L" — MarkReader");
+    std::wstring title = (edit_mode_ && editor_.IsModified()) ? (L"• " + base) : base;
     SetWindowTextW(hwnd_, title.c_str());
 }
 
@@ -961,7 +1039,7 @@ void MainWindow::RebuildLayout(bool preserve_anchor) {
     dragging_hscroll_kind_ = HScrollKind::None;
     hovered_hscroll_kind_ = HScrollKind::None;
     ScrollAnchor anchor;
-    if (preserve_anchor) {
+    if (preserve_anchor && !edit_mode_) {
         anchor = layout_.CaptureScrollAnchor(scroll_y_);
     }
 
@@ -971,6 +1049,21 @@ void MainWindow::RebuildLayout(bool preserve_anchor) {
     bool sb_vis = (sb.right > sb.left);
 
     layout_.Build(doc_, vp_w, config_.zoom_percent, sb_vis, GetThemePalette(config_.theme), images_);
+
+    if (edit_mode_) {
+        int top_line = preserve_anchor ? editor_.GetTopVisibleLine() : -1;
+        editor_.EnsureLayout(vp, config_.zoom_percent, d2d_.DWrite(), GetThemePalette(config_.theme));
+        if (top_line >= 0) {
+            editor_.ScrollToLineAtTop(top_line);
+        }
+        if (find_visible_ && !find_query_.empty()) {
+            editor_find_matches_ = editor_.FindAllMatches(find_query_);
+            if (active_match_idx_ >= static_cast<int>(editor_find_matches_.size())) {
+                active_match_idx_ = editor_find_matches_.empty() ? -1 : 0;
+            }
+        }
+        return;
+    }
 
     float new_max = MaxDocScrollY();
     if (preserve_anchor && anchor.kind != ScrollAnchor::Kind::None) {
@@ -1017,59 +1110,93 @@ D2D1_RECT_F MainWindow::GetFindInputRect(const D2D1_RECT_F& bar) const {
     return D2D1::RectF(bar.left + 8.0f, bar.top + 6.0f, bar.right - 128.0f, bar.bottom - 6.0f);
 }
 
+void MainWindow::UpdateImeEnablement() {
+    if (!hwnd_) return;
+    const bool want_ime = (find_visible_ && find_focused_) || (edit_mode_ && !find_focused_);
+    if (want_ime) {
+        if (saved_himc_) ImmAssociateContext(hwnd_, saved_himc_);
+        find_caret_visible_ = true;
+        editor_caret_visible_ = true;
+        SetTimer(hwnd_, kTimerCaret, 530, nullptr);
+        UpdateImePosition();
+    } else {
+        ime_comp_.clear();
+        KillTimer(hwnd_, kTimerCaret);
+        if (saved_himc_) ImmAssociateContext(hwnd_, nullptr);
+    }
+}
+
 void MainWindow::SetFindFocused(bool focused) {
     if (find_focused_ == focused) {
         if (focused) UpdateImePosition();
         return;
     }
     find_focused_ = focused;
-    if (focused) {
-        if (saved_himc_) ImmAssociateContext(hwnd_, saved_himc_);
-        find_caret_visible_ = true;
-        SetTimer(hwnd_, kTimerCaret, 530, nullptr);
-        UpdateImePosition();
-    } else {
+    if (!focused) {
         ime_comp_.clear();
         find_sel_all_ = false;
-        KillTimer(hwnd_, kTimerCaret);
-        if (saved_himc_) ImmAssociateContext(hwnd_, nullptr);
     }
+    UpdateImeEnablement();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void MainWindow::UpdateImePosition() {
-    if (!hwnd_ || !find_visible_ || !find_focused_) return;
-    HIMC himc = ImmGetContext(hwnd_);
-    if (!himc) return;
+    if (!hwnd_) return;
+    if (find_visible_ && find_focused_) {
+        HIMC himc = ImmGetContext(hwnd_);
+        if (!himc) return;
 
-    D2D1_RECT_F tb{}, sb{}, sp{}, vp{}, vs{};
-    ComputeRegions(tb, sb, sp, vp, vs);
-    D2D1_RECT_F bar = GetFindBarRect(vp);
-    D2D1_RECT_F inp = GetFindInputRect(bar);
+        D2D1_RECT_F tb{}, sb{}, sp{}, vp{}, vs{};
+        ComputeRegions(tb, sb, sp, vp, vs);
+        D2D1_RECT_F bar = GetFindBarRect(vp);
+        D2D1_RECT_F inp = GetFindInputRect(bar);
 
-    float caret_x_dip = inp.left + 8.0f;
-    std::wstring display = find_query_.substr(0, std::min(find_caret_, find_query_.size())) + ime_comp_;
-    if (!display.empty() && d2d_.DWrite()) {
-        if (auto tl = MakeUiText(d2d_.DWrite(), display, 13.0f, false, 4000.0f)) {
-            DWRITE_TEXT_METRICS tm{};
-            tl->GetMetrics(&tm);
-            caret_x_dip = std::min(inp.right - 8.0f, inp.left + 8.0f + tm.widthIncludingTrailingWhitespace - find_scroll_x_);
+        float caret_x_dip = inp.left + 8.0f;
+        std::wstring display = find_query_.substr(0, std::min(find_caret_, find_query_.size())) + ime_comp_;
+        if (!display.empty() && d2d_.DWrite()) {
+            if (auto tl = MakeUiText(d2d_.DWrite(), display, 13.0f, false, 4000.0f)) {
+                DWRITE_TEXT_METRICS tm{};
+                tl->GetMetrics(&tm);
+                caret_x_dip = std::min(inp.right - 8.0f, inp.left + 8.0f + tm.widthIncludingTrailingWhitespace - find_scroll_x_);
+            }
         }
+
+        COMPOSITIONFORM cf{};
+        cf.dwStyle = CFS_POINT;
+        cf.ptCurrentPos.x = DipToPx(caret_x_dip);
+        cf.ptCurrentPos.y = DipToPx(inp.bottom + 2.0f);
+        ImmSetCompositionWindow(himc, &cf);
+
+        LOGFONTW lf{};
+        lf.lfHeight = -DipToPx(13.0f);
+        lf.lfWeight = FW_NORMAL;
+        wcscpy_s(lf.lfFaceName, L"Segoe UI");
+        ImmSetCompositionFontW(himc, &lf);
+
+        ImmReleaseContext(hwnd_, himc);
+        return;
     }
 
-    COMPOSITIONFORM cf{};
-    cf.dwStyle = CFS_POINT;
-    cf.ptCurrentPos.x = DipToPx(caret_x_dip);
-    cf.ptCurrentPos.y = DipToPx(inp.bottom + 2.0f);
-    ImmSetCompositionWindow(himc, &cf);
+    if (edit_mode_ && !find_focused_) {
+        HIMC himc = ImmGetContext(hwnd_);
+        if (!himc) return;
 
-    LOGFONTW lf{};
-    lf.lfHeight = -DipToPx(13.0f);
-    lf.lfWeight = FW_NORMAL;
-    wcscpy_s(lf.lfFaceName, L"Segoe UI");
-    ImmSetCompositionFontW(himc, &lf);
+        D2D1_POINT_2F cp = editor_.GetCaretClientDIP();
+        COMPOSITIONFORM cf{};
+        cf.dwStyle = CFS_POINT;
+        cf.ptCurrentPos.x = DipToPx(cp.x);
+        cf.ptCurrentPos.y = DipToPx(cp.y + 2.0f);
+        ImmSetCompositionWindow(himc, &cf);
 
-    ImmReleaseContext(hwnd_, himc);
+        float zscale = static_cast<float>(std::clamp(config_.zoom_percent, 50, 250)) / 100.0f;
+        LOGFONTW lf{};
+        lf.lfHeight = -DipToPx(14.5f * zscale);
+        lf.lfWeight = FW_NORMAL;
+        wcscpy_s(lf.lfFaceName, L"Consolas");
+        ImmSetCompositionFontW(himc, &lf);
+
+        ImmReleaseContext(hwnd_, himc);
+    }
 }
 
 void MainWindow::ShowFindBar(bool show) {
@@ -1081,26 +1208,39 @@ void MainWindow::ShowFindBar(bool show) {
     } else {
         SetFindFocused(false);
         search_matches_.clear();
+        editor_find_matches_.clear();
         active_match_idx_ = -1;
     }
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void MainWindow::OnChar(wchar_t ch) {
-    if (!find_visible_ || !find_focused_) return;
     if (ch < 0x20 || ch == 0x7F) return;
 
-    if (find_sel_all_) {
-        find_query_.clear();
-        find_caret_ = 0;
-        find_sel_all_ = false;
+    if (find_visible_ && find_focused_) {
+        if (find_sel_all_) {
+            find_query_.clear();
+            find_caret_ = 0;
+            find_sel_all_ = false;
+        }
+        find_caret_ = std::min(find_caret_, find_query_.size());
+        find_query_.insert(find_caret_, 1, ch);
+        ++find_caret_;
+        find_caret_visible_ = true;
+        RunSearch(find_query_, true);
+        UpdateImePosition();
+        return;
     }
-    find_caret_ = std::min(find_caret_, find_query_.size());
-    find_query_.insert(find_caret_, 1, ch);
-    ++find_caret_;
-    find_caret_visible_ = true;
-    RunSearch(find_query_, true);
-    UpdateImePosition();
+
+    if (edit_mode_ && !find_focused_) {
+        if (editor_.OnChar(ch)) {
+            editor_caret_visible_ = true;
+            if (find_visible_ && !find_query_.empty()) RunSearch(find_query_, false);
+            UpdateWindowTitle();
+            UpdateImePosition();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
+    }
 }
 
 void MainWindow::OnImeComposition(LPARAM lparam) {
@@ -1108,7 +1248,7 @@ void MainWindow::OnImeComposition(LPARAM lparam) {
     if (!himc) return;
 
     if (lparam & GCS_COMPSTR) {
-        if (find_sel_all_) {
+        if (find_visible_ && find_focused_ && find_sel_all_) {
             find_query_.clear();
             find_caret_ = 0;
             find_sel_all_ = false;
@@ -1122,6 +1262,7 @@ void MainWindow::OnImeComposition(LPARAM lparam) {
             ime_comp_.clear();
         }
         find_caret_visible_ = true;
+        editor_caret_visible_ = true;
         UpdateImePosition();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
@@ -1134,6 +1275,27 @@ void MainWindow::OnImeComposition(LPARAM lparam) {
 
 void MainWindow::RunSearch(const std::wstring& query, bool jump_to_first) {
     find_query_ = query;
+    if (edit_mode_) {
+        editor_find_matches_ = editor_.FindAllMatches(query);
+        if (editor_find_matches_.empty()) {
+            active_match_idx_ = -1;
+        } else if (jump_to_first) {
+            int top_ln = editor_.GetTopVisibleLine();
+            active_match_idx_ = 0;
+            for (size_t i = 0; i < editor_find_matches_.size(); ++i) {
+                if (editor_find_matches_[i].line >= top_ln) {
+                    active_match_idx_ = static_cast<int>(i);
+                    break;
+                }
+            }
+            editor_.ScrollMatchIntoView(editor_find_matches_[active_match_idx_]);
+        } else if (active_match_idx_ >= static_cast<int>(editor_find_matches_.size())) {
+            active_match_idx_ = 0;
+        }
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+
     search_matches_ = layout_.FindAllMatches(query);
     if (search_matches_.empty()) {
         active_match_idx_ = -1;
@@ -1154,6 +1316,15 @@ void MainWindow::RunSearch(const std::wstring& query, bool jump_to_first) {
 }
 
 void MainWindow::JumpToMatch(int delta) {
+    if (edit_mode_) {
+        if (editor_find_matches_.empty()) return;
+        int n = static_cast<int>(editor_find_matches_.size());
+        if (active_match_idx_ < 0) active_match_idx_ = 0;
+        else active_match_idx_ = (active_match_idx_ + delta % n + n) % n;
+        editor_.ScrollMatchIntoView(editor_find_matches_[active_match_idx_]);
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
     if (search_matches_.empty()) return;
     int n = static_cast<int>(search_matches_.size());
     if (active_match_idx_ < 0) active_match_idx_ = 0;
@@ -1163,6 +1334,124 @@ void MainWindow::JumpToMatch(int delta) {
     ComputeRegions(tb, sb, sp, vp, vs);
     float vp_h = vp.bottom - vp.top;
     ScrollToY(search_matches_[active_match_idx_].y - vp_h * 0.35f, true);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+bool MainWindow::SaveCurrentDocument(bool show_toast) {
+    if (!edit_mode_) return true;
+    std::string updated = editor_.GetUtf8();
+    if (doc_.file_path.empty()) {
+        source_utf8_ = std::move(updated);
+        editor_.MarkSaved();
+        UpdateWindowTitle();
+        if (show_toast) ShowToast(L"已更新文档缓存");
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return true;
+    }
+
+    std::wstring err;
+    if (!SaveTextFileUtf8(doc_.file_path, updated, err)) {
+        ShowToast(err);
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return false;
+    }
+
+    source_utf8_ = std::move(updated);
+    editor_.MarkSaved();
+    watcher_.Watch(doc_.file_path);
+    doc_ = ParseMarkdownDocument(source_utf8_, doc_.file_path);
+    UpdateWindowTitle();
+    if (show_toast) ShowToast(L"已保存");
+    InvalidateRect(hwnd_, nullptr, FALSE);
+    return true;
+}
+
+bool MainWindow::ConfirmDiscardOrSaveBeforeLeave() {
+    if (!edit_mode_ || !editor_.IsModified()) return true;
+    if (doc_.file_path.empty()) {
+        int res = MessageBoxW(
+            hwnd_, L"当前示例文档有未保留的修改，是否仍要放弃这些修改？",
+            L"MarkReader", MB_YESNO | MB_ICONQUESTION);
+        return res == IDYES;
+    }
+    int res = MessageBoxW(
+        hwnd_, L"当前文档有未保存的修改，是否先保存再继续？",
+        L"MarkReader", MB_YESNOCANCEL | MB_ICONQUESTION);
+    if (res == IDCANCEL) return false;
+    if (res == IDYES) return SaveCurrentDocument(false);
+    return true;
+}
+
+void MainWindow::ToggleEditMode() {
+    if (autoscroll_active_) StopAutoScroll();
+    if (anim_timer_active_) {
+        KillTimer(hwnd_, kTimerAnim);
+        anim_timer_active_ = false;
+    }
+    dragging_selection_ = false;
+    dragging_vscroll_ = false;
+    dragging_hscroll_kind_ = HScrollKind::None;
+    active_hscroll_idx_ = -1;
+
+    D2D1_RECT_F tb{}, sb{}, sp{}, vp{}, vs{};
+    ComputeRegions(tb, sb, sp, vp, vs);
+
+    if (!edit_mode_) {
+        int anchor_line = layout_.CaptureSourceLineAtY(scroll_y_);
+        edit_mode_ = true;
+        selection_.Clear();
+        lightbox_image_idx_ = -1;
+        hovered_link_url_.clear();
+
+        editor_.SetDocument(source_utf8_);
+        editor_.EnsureLayout(vp, config_.zoom_percent, d2d_.DWrite(), GetThemePalette(config_.theme));
+        editor_.ScrollToLineAtTop(anchor_line);
+
+        if (find_visible_ && !find_query_.empty()) {
+            RunSearch(find_query_, false);
+        }
+        UpdateImeEnablement();
+        UpdateWindowTitle();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+
+    int top_line = editor_.GetTopVisibleLine();
+    bool was_modified = editor_.IsModified();
+    if (was_modified && !doc_.file_path.empty()) {
+        if (!SaveCurrentDocument(false)) {
+            return;
+        }
+    } else if (was_modified) {
+        source_utf8_ = editor_.GetUtf8();
+        editor_.MarkSaved();
+    }
+
+    std::wstring virtual_title = doc_.file_path.empty() ? doc_.doc_title : L"";
+    doc_ = ParseMarkdownDocument(source_utf8_, doc_.file_path);
+    if (!virtual_title.empty()) doc_.doc_title = virtual_title;
+
+    edit_mode_ = false;
+    editor_find_matches_.clear();
+    ime_comp_.clear();
+    selection_.Clear();
+    hovered_link_url_.clear();
+
+    RebuildLayout(false);
+    float target_y = layout_.ResolveYForSourceLine(top_line);
+    scroll_y_ = target_scroll_y_ = std::clamp(target_y, 0.0f, MaxDocScrollY());
+
+    if (find_visible_ && !find_query_.empty()) {
+        RunSearch(find_query_, false);
+    } else {
+        search_matches_.clear();
+        active_match_idx_ = -1;
+    }
+    UpdateImeEnablement();
+    UpdateWindowTitle();
+    if (was_modified) {
+        ShowToast(doc_.file_path.empty() ? L"已更新并返回阅读模式" : L"已保存并返回阅读模式");
+    }
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -1182,8 +1471,24 @@ void MainWindow::Render() {
 
     dc->Clear(t.bg_canvas);
 
-    // 1. Document Viewport
-    {
+    // 1. Document Viewport (Read Mode OR Quick Source Edit Mode)
+    if (edit_mode_) {
+        editor_.EnsureLayout(viewport, config_.zoom_percent, d2d_.DWrite(), t);
+        editor_.Render(
+            dc, viewport, t, !find_focused_, editor_caret_visible_,
+            find_focused_ ? L"" : ime_comp_, editor_find_matches_, active_match_idx_);
+
+        D2D1_RECT_F thumb = editor_.ScrollbarThumbRect();
+        if (thumb.bottom > thumb.top) {
+            brush->SetColor(dragging_vscroll_ ? t.scrollbar_thumb_hover : t.scrollbar_thumb);
+            dc->FillRoundedRectangle(D2D1::RoundedRect(thumb, 3.0f, 3.0f), brush.Get());
+        }
+
+        dc->PushAxisAlignedClip(viewport, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        RenderFindBar(dc, brush.Get(), t, viewport);
+        RenderOverlays(dc, brush.Get(), t, viewport);
+        dc->PopAxisAlignedClip();
+    } else {
         dc->PushAxisAlignedClip(viewport, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         dc->SetTransform(D2D1::Matrix3x2F::Translation(viewport.left, viewport.top - scroll_y_));
 
@@ -1273,16 +1578,38 @@ void MainWindow::RenderToolbar(
     DrawButtonBox(dc, brush, r.btn_open, hovered_toolbar_btn_ == BTN_OPEN, false, t);
     DrawToolbarText(dc, brush, dw, r.btn_open, L"打开", 12.5f, true, t.text_primary);
 
+    // Edit / Done toggle button
+    if (edit_mode_) {
+        brush->SetColor(t.accent);
+        dc->FillRoundedRectangle(D2D1::RoundedRect(r.btn_edit, 6.0f, 6.0f), brush);
+        if (hovered_toolbar_btn_ == BTN_EDIT) {
+            brush->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.14f));
+            dc->FillRoundedRectangle(D2D1::RoundedRect(r.btn_edit, 6.0f, 6.0f), brush);
+        }
+        DrawToolbarText(dc, brush, dw, r.btn_edit, L"完成", 12.5f, true, D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f));
+    } else {
+        brush->SetColor(t.bg_elevated);
+        dc->FillRoundedRectangle(D2D1::RoundedRect(r.btn_edit, 6.0f, 6.0f), brush);
+        brush->SetColor(t.border);
+        dc->DrawRoundedRectangle(D2D1::RoundedRect(r.btn_edit, 6.0f, 6.0f), brush, 1.0f);
+        DrawButtonBox(dc, brush, r.btn_edit, hovered_toolbar_btn_ == BTN_EDIT, false, t);
+        DrawToolbarText(dc, brush, dw, r.btn_edit, L"编辑", 12.5f, true, t.text_primary);
+    }
+
     // Document title centered in the window horizontally with crisp foreground ink & normal size
-    float safe_x0 = r.btn_open.right + 16.0f;
+    float safe_x0 = r.btn_edit.right + 16.0f;
     float safe_x1 = r.btn_find.left - 16.0f;
-    if (safe_x1 > safe_x0 + 48.0f && !doc_.doc_title.empty()) {
+    std::wstring disp_title = doc_.doc_title;
+    if (edit_mode_ && editor_.IsModified() && !disp_title.empty()) {
+        disp_title = L"\u2022 " + disp_title;
+    }
+    if (safe_x1 > safe_x0 + 48.0f && !disp_title.empty()) {
         float win_cx = (toolbar.left + toolbar.right) * 0.5f;
         float half_sym = std::max(0.0f, std::min(win_cx - safe_x0, safe_x1 - win_cx));
         float sym_w = half_sym * 2.0f;
 
         float natural_w = 0.0f;
-        if (auto measure = MakeUiText(dw, doc_.doc_title, 14.0f, true, 4000.0f)) {
+        if (auto measure = MakeUiText(dw, disp_title, 14.0f, true, 4000.0f)) {
             DWRITE_TEXT_METRICS mtm{};
             measure->GetMetrics(&mtm);
             natural_w = mtm.widthIncludingTrailingWhitespace;
@@ -1294,7 +1621,7 @@ void MainWindow::RenderToolbar(
             box_x = win_cx - half_sym;
             box_w = sym_w;
         }
-        if (auto tl = MakeUiText(dw, doc_.doc_title, 14.0f, true, box_w, DWRITE_TEXT_ALIGNMENT_CENTER, true)) {
+        if (auto tl = MakeUiText(dw, disp_title, 14.0f, true, box_w, DWRITE_TEXT_ALIGNMENT_CENTER, true)) {
             DWRITE_TEXT_METRICS tm{};
             tl->GetMetrics(&tm);
             float ty = toolbar.top + ((toolbar.bottom - toolbar.top) - tm.height) * 0.5f;
@@ -1431,6 +1758,14 @@ void MainWindow::RenderSidebar(
         int min_level = 6;
         for (const auto& entry : doc_.outline) min_level = std::min(min_level, entry.level);
         int active_id = layout_.FindActiveHeadingId(target_scroll_y_);
+        if (edit_mode_) {
+            int top_ln = editor_.GetTopVisibleLine();
+            active_id = doc_.outline.front().heading_id;
+            for (const auto& entry : doc_.outline) {
+                if (entry.source_line <= top_ln + 1) active_id = entry.heading_id;
+                else break;
+            }
+        }
 
         for (size_t i = 0; i < doc_.outline.size(); ++i) {
             const auto& entry = doc_.outline[i];
@@ -1489,7 +1824,8 @@ void MainWindow::RenderFindBar(
 
     // Build displayed string = prefix + ime_comp + suffix
     const size_t caret_pos = std::min(find_caret_, find_query_.size());
-    std::wstring full_text = find_query_.substr(0, caret_pos) + ime_comp_ + find_query_.substr(caret_pos);
+    const std::wstring& active_comp = find_focused_ ? ime_comp_ : std::wstring();
+    std::wstring full_text = find_query_.substr(0, caret_pos) + active_comp + find_query_.substr(caret_pos);
 
     const float pad_x = 8.0f;
     const float inner_w = std::max(20.0f, (inp.right - inp.left) - 2.0f * pad_x);
@@ -1512,10 +1848,10 @@ void MainWindow::RenderFindBar(
                 brush, 1.5f);
         }
     } else if (auto tl = MakeUiText(dw, full_text, 12.8f, false, 4000.0f, DWRITE_TEXT_ALIGNMENT_LEADING, false)) {
-        if (!ime_comp_.empty()) {
-            tl->SetUnderline(TRUE, {static_cast<UINT32>(caret_pos), static_cast<UINT32>(ime_comp_.size())});
+        if (!active_comp.empty()) {
+            tl->SetUnderline(TRUE, {static_cast<UINT32>(caret_pos), static_cast<UINT32>(active_comp.size())});
         }
-        const UINT32 visual_caret = static_cast<UINT32>(caret_pos + ime_comp_.size());
+        const UINT32 visual_caret = static_cast<UINT32>(caret_pos + active_comp.size());
         float cx = 0.0f, cy = 0.0f;
         DWRITE_HIT_TEST_METRICS htm{};
         tl->HitTestTextPosition(visual_caret, FALSE, &cx, &cy, &htm);
@@ -1529,7 +1865,7 @@ void MainWindow::RenderFindBar(
 
         const float draw_x = inp.left + pad_x - find_scroll_x_;
 
-        if (find_sel_all_ && ime_comp_.empty()) {
+        if (find_sel_all_ && active_comp.empty()) {
             DWRITE_TEXT_METRICS tm{};
             tl->GetMetrics(&tm);
             brush->SetColor(t.selection_bg);
@@ -1553,18 +1889,19 @@ void MainWindow::RenderFindBar(
     dc->PopAxisAlignedClip();
 
     // Match counter
+    const size_t total_matches = edit_mode_ ? editor_find_matches_.size() : search_matches_.size();
     std::wstring cnt;
     if (!find_query_.empty()) {
-        if (search_matches_.empty()) {
+        if (total_matches == 0) {
             cnt = L"0 / 0";
         } else {
-            cnt = std::to_wstring(active_match_idx_ + 1) + L" / " + std::to_wstring(search_matches_.size());
+            cnt = std::to_wstring(active_match_idx_ + 1) + L" / " + std::to_wstring(total_matches);
         }
     }
     D2D1_RECT_F cnt_r = D2D1::RectF(bar.right - 126.0f, bar.top + 5.0f, bar.right - 76.0f, bar.bottom - 5.0f);
     if (!cnt.empty()) {
         DrawToolbarText(dc, brush, dw, cnt_r, cnt, 11.5f, false,
-                        search_matches_.empty() ? t.adm_caution_accent : t.text_secondary);
+                        total_matches == 0 ? t.adm_caution_accent : t.text_secondary);
     }
 
     D2D1_RECT_F prev_r = D2D1::RectF(bar.right - 74.0f, bar.top + 6.0f, bar.right - 52.0f, bar.bottom - 6.0f);
@@ -1699,10 +2036,17 @@ void MainWindow::OnMouseMove(float x_dip, float y_dip, WPARAM wp) {
     if (dragging_vscroll_) {
         float vp_h = vp.bottom - vp.top;
         float track_h = vs.bottom - vs.top;
-        float thumb_h = std::max(32.0f, track_h * (vp_h / std::max(1.0f, layout_.TotalHeight())));
+        float total_h = edit_mode_ ? editor_.TotalHeight() : layout_.TotalHeight();
+        float max_s = edit_mode_ ? editor_.MaxScrollY() : MaxDocScrollY();
+        float thumb_h = std::max(32.0f, track_h * (vp_h / std::max(1.0f, total_h)));
         float denom = std::max(1.0f, track_h - thumb_h);
         float ratio = std::clamp((y_dip - vs.top - vscroll_drag_offset_) / denom, 0.0f, 1.0f);
-        scroll_y_ = target_scroll_y_ = ratio * MaxDocScrollY();
+        if (edit_mode_) {
+            editor_.SetScrollY(ratio * max_s);
+            UpdateImePosition();
+        } else {
+            scroll_y_ = target_scroll_y_ = ratio * max_s;
+        }
         InvalidateRect(hwnd_, nullptr, FALSE);
         return;
     }
@@ -1719,6 +2063,21 @@ void MainWindow::OnMouseMove(float x_dip, float y_dip, WPARAM wp) {
             autoscroll_moved_ = true;
         }
         SetCursor(LoadCursorW(nullptr, autoscroll_h_kind_ != HScrollKind::None ? IDC_SIZEWE : IDC_SIZENS));
+        return;
+    }
+
+    if (edit_mode_ && (wp & MK_LBUTTON) && GetCapture() == hwnd_) {
+        if (y_dip < vp.top + 16.0f) {
+            editor_.SetScrollY(editor_.ScrollY() - 24.0f);
+        } else if (y_dip > vp.bottom - 16.0f) {
+            editor_.SetScrollY(editor_.ScrollY() + 24.0f);
+        }
+        if (editor_.OnMouseMove(x_dip, y_dip)) {
+            editor_caret_visible_ = true;
+            UpdateImePosition();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
+        SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
         return;
     }
 
@@ -1768,6 +2127,7 @@ void MainWindow::OnMouseMove(float x_dip, float y_dip, WPARAM wp) {
         ToolbarHitRects tr = ComputeToolbarButtons(tb);
         if (RectContains(tr.btn_outline, x_dip, y_dip)) { hovered_toolbar_btn_ = BTN_OUTLINE; cursor = IDC_HAND; }
         else if (RectContains(tr.btn_open, x_dip, y_dip)) { hovered_toolbar_btn_ = BTN_OPEN; cursor = IDC_HAND; }
+        else if (RectContains(tr.btn_edit, x_dip, y_dip)) { hovered_toolbar_btn_ = BTN_EDIT; cursor = IDC_HAND; }
         else if (RectContains(tr.btn_find, x_dip, y_dip)) { hovered_toolbar_btn_ = BTN_FIND; cursor = IDC_HAND; }
         else if (RectContains(tr.btn_zoom_out, x_dip, y_dip)) { hovered_toolbar_btn_ = BTN_ZOOM_OUT; cursor = IDC_HAND; }
         else if (RectContains(tr.btn_zoom_reset, x_dip, y_dip)) { hovered_toolbar_btn_ = BTN_ZOOM_RESET; cursor = IDC_HAND; }
@@ -1799,39 +2159,47 @@ void MainWindow::OnMouseMove(float x_dip, float y_dip, WPARAM wp) {
         else if (RectContains(next_r, x_dip, y_dip)) { hovered_find_btn_ = FBTN_NEXT; cursor = IDC_HAND; }
         else if (RectContains(close_r, x_dip, y_dip)) { hovered_find_btn_ = FBTN_CLOSE; cursor = IDC_HAND; }
     } else if (RectContains(vp, x_dip, y_dip)) {
-        float doc_x = x_dip - vp.left;
-        float doc_y = y_dip - vp.top + scroll_y_;
-
-        const auto& maths = layout_.MathBlocks();
-        for (size_t i = 0; i < maths.size(); ++i) {
-            if (RectContains(maths[i].card_rect, doc_x, doc_y)) {
-                hovered_copy_math_idx_ = static_cast<int>(i);
-                break;
+        if (edit_mode_) {
+            if (editor_.MaxScrollY() > 1.0f && x_dip >= vs.left - 4.0f && x_dip <= vs.right + 4.0f) {
+                cursor = IDC_ARROW;
+            } else {
+                cursor = IDC_IBEAM;
             }
-        }
+        } else {
+            float doc_x = x_dip - vp.left;
+            float doc_y = y_dip - vp.top + scroll_y_;
 
-        HitTestResult hr = layout_.HitTest(doc_x, doc_y);
-        if (hr.target == HitTestResult::Target::CopyCodeBtn) {
-            hovered_copy_code_idx_ = hr.item_index;
-            cursor = IDC_HAND;
-        } else if (hr.target == HitTestResult::Target::CopyMathBtn) {
-            hovered_copy_math_idx_ = hr.item_index;
-            cursor = IDC_HAND;
-        } else if (hr.target == HitTestResult::Target::CodeHScroll) {
-            hovered_hscroll_kind_ = HScrollKind::Code;
-            hovered_hscroll_idx_ = hr.item_index;
-            cursor = IDC_HAND;
-        } else if (hr.target == HitTestResult::Target::TableHScroll) {
-            hovered_hscroll_kind_ = HScrollKind::Table;
-            hovered_hscroll_idx_ = hr.item_index;
-            cursor = IDC_HAND;
-        } else if (hr.target == HitTestResult::Target::Link) {
-            hovered_link_url_ = hr.url;
-            cursor = IDC_HAND;
-        } else if (hr.target == HitTestResult::Target::Image) {
-            cursor = IDC_HAND;
-        } else if (hr.target == HitTestResult::Target::Text) {
-            cursor = IDC_IBEAM;
+            const auto& maths = layout_.MathBlocks();
+            for (size_t i = 0; i < maths.size(); ++i) {
+                if (RectContains(maths[i].card_rect, doc_x, doc_y)) {
+                    hovered_copy_math_idx_ = static_cast<int>(i);
+                    break;
+                }
+            }
+
+            HitTestResult hr = layout_.HitTest(doc_x, doc_y);
+            if (hr.target == HitTestResult::Target::CopyCodeBtn) {
+                hovered_copy_code_idx_ = hr.item_index;
+                cursor = IDC_HAND;
+            } else if (hr.target == HitTestResult::Target::CopyMathBtn) {
+                hovered_copy_math_idx_ = hr.item_index;
+                cursor = IDC_HAND;
+            } else if (hr.target == HitTestResult::Target::CodeHScroll) {
+                hovered_hscroll_kind_ = HScrollKind::Code;
+                hovered_hscroll_idx_ = hr.item_index;
+                cursor = IDC_HAND;
+            } else if (hr.target == HitTestResult::Target::TableHScroll) {
+                hovered_hscroll_kind_ = HScrollKind::Table;
+                hovered_hscroll_idx_ = hr.item_index;
+                cursor = IDC_HAND;
+            } else if (hr.target == HitTestResult::Target::Link) {
+                hovered_link_url_ = hr.url;
+                cursor = IDC_HAND;
+            } else if (hr.target == HitTestResult::Target::Image) {
+                cursor = IDC_HAND;
+            } else if (hr.target == HitTestResult::Target::Text) {
+                cursor = IDC_IBEAM;
+            }
         }
     }
 
@@ -1860,6 +2228,7 @@ void MainWindow::OnLButtonDown(float x_dip, float y_dip, WPARAM wp) {
         ToolbarHitRects tr = ComputeToolbarButtons(tb);
         if (RectContains(tr.btn_outline, x_dip, y_dip)) ToggleOutline();
         else if (RectContains(tr.btn_open, x_dip, y_dip)) OpenFileDialog();
+        else if (RectContains(tr.btn_edit, x_dip, y_dip)) ToggleEditMode();
         else if (RectContains(tr.btn_find, x_dip, y_dip)) ShowFindBar(!find_visible_);
         else if (RectContains(tr.btn_zoom_out, x_dip, y_dip)) SetZoom(config_.zoom_percent - 10);
         else if (RectContains(tr.btn_zoom_reset, x_dip, y_dip)) SetZoom(100);
@@ -1924,9 +2293,16 @@ void MainWindow::OnLButtonDown(float x_dip, float y_dip, WPARAM wp) {
         if (y_dip >= list_top && y_dip <= list_bot && !doc_.outline.empty()) {
             int idx = static_cast<int>((y_dip - (list_top + 6.0f) + outline_scroll_y_) / kOutlineRowH);
             if (idx >= 0 && idx < static_cast<int>(doc_.outline.size())) {
-                float hy = 0.0f;
-                if (layout_.GetHeadingY(doc_.outline[idx].heading_id, hy)) {
-                    ScrollToY(hy - 18.0f, true);
+                if (edit_mode_) {
+                    editor_.SetCaretToLine(doc_.outline[idx].source_line);
+                    editor_caret_visible_ = true;
+                    UpdateImePosition();
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                } else {
+                    float hy = 0.0f;
+                    if (layout_.GetHeadingY(doc_.outline[idx].heading_id, hy)) {
+                        ScrollToY(hy - 18.0f, true);
+                    }
                 }
             }
         }
@@ -1934,22 +2310,41 @@ void MainWindow::OnLButtonDown(float x_dip, float y_dip, WPARAM wp) {
     }
 
     // Vertical scrollbar drag
-    float max_s = MaxDocScrollY();
+    float max_s = edit_mode_ ? editor_.MaxScrollY() : MaxDocScrollY();
+    float total_h = edit_mode_ ? editor_.TotalHeight() : layout_.TotalHeight();
+    float cur_sy = edit_mode_ ? editor_.ScrollY() : scroll_y_;
     if (max_s > 1.0f && x_dip >= vs.left - 4.0f && x_dip <= vs.right + 4.0f && y_dip >= vp.top && y_dip <= vp.bottom) {
         float vp_h = vp.bottom - vp.top;
         float track_h = vs.bottom - vs.top;
-        float thumb_h = std::max(32.0f, track_h * (vp_h / layout_.TotalHeight()));
-        float thumb_y = vs.top + (track_h - thumb_h) * (scroll_y_ / max_s);
+        float thumb_h = std::max(32.0f, track_h * (vp_h / std::max(1.0f, total_h)));
+        float thumb_y = vs.top + (track_h - thumb_h) * (cur_sy / max_s);
         if (y_dip >= thumb_y && y_dip <= thumb_y + thumb_h) {
             vscroll_drag_offset_ = y_dip - thumb_y;
         } else {
             vscroll_drag_offset_ = thumb_h * 0.5f;
             float ratio = std::clamp((y_dip - vs.top - vscroll_drag_offset_) / std::max(1.0f, track_h - thumb_h), 0.0f, 1.0f);
-            scroll_y_ = target_scroll_y_ = ratio * max_s;
+            if (edit_mode_) {
+                editor_.SetScrollY(ratio * max_s);
+                UpdateImePosition();
+            } else {
+                scroll_y_ = target_scroll_y_ = ratio * max_s;
+            }
         }
         dragging_vscroll_ = true;
         SetCapture(hwnd_);
         InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+
+    if (edit_mode_) {
+        if (RectContains(vp, x_dip, y_dip)) {
+            if (editor_.OnLButtonDown(x_dip, y_dip, (wp & MK_SHIFT) != 0)) {
+                editor_caret_visible_ = true;
+                UpdateImePosition();
+                SetCapture(hwnd_);
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+        }
         return;
     }
 
@@ -2063,9 +2458,19 @@ void MainWindow::OnLButtonDblClick(float x_dip, float y_dip) {
     }
 
     // Forward rapid clicks on toolbar, sidebar, scrollbar, and buttons so rapid toggling never drops clicks.
+    float max_vs = edit_mode_ ? editor_.MaxScrollY() : MaxDocScrollY();
     if (!RectContains(vp, x_dip, y_dip) || lightbox_image_idx_ >= 0 ||
-        (MaxDocScrollY() > 1.0f && x_dip >= vs.left - 4.0f && x_dip <= vs.right + 4.0f)) {
+        (max_vs > 1.0f && x_dip >= vs.left - 4.0f && x_dip <= vs.right + 4.0f)) {
         OnLButtonDown(x_dip, y_dip, MK_LBUTTON);
+        return;
+    }
+
+    if (edit_mode_) {
+        if (editor_.OnLButtonDblClick(x_dip, y_dip)) {
+            editor_caret_visible_ = true;
+            UpdateImePosition();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
         return;
     }
 
@@ -2093,11 +2498,16 @@ void MainWindow::OnLButtonUp(float x_dip, float y_dip) {
         dragging_splitter_ = false;
         SaveAppConfig(config_);
     }
+    if (edit_mode_) {
+        editor_.OnLButtonUp();
+    }
     dragging_selection_ = false;
     dragging_vscroll_ = false;
     dragging_hscroll_kind_ = HScrollKind::None;
     active_hscroll_idx_ = -1;
     if (!autoscroll_active_ && GetCapture() == hwnd_) ReleaseCapture();
+
+    if (edit_mode_) return;
 
     if (was_selecting && !selection_.HasSelection()) {
         D2D1_RECT_F tb{}, sb{}, sp{}, vp{}, vs{};
@@ -2115,8 +2525,29 @@ void MainWindow::OnRButtonUp(float, float, POINT screen_pt) {
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
 
+    if (edit_mode_) {
+        bool has_sel = editor_.HasSelection();
+        AppendMenuW(menu, has_sel ? MF_STRING : (MF_STRING | MF_GRAYED), CMD_CUT, L"剪切\tCtrl+X");
+        AppendMenuW(menu, has_sel ? MF_STRING : (MF_STRING | MF_GRAYED), CMD_COPY, L"复制\tCtrl+C");
+        AppendMenuW(menu, MF_STRING, CMD_PASTE, L"粘贴\tCtrl+V");
+        AppendMenuW(menu, MF_STRING, CMD_SELECT_ALL, L"全选\tCtrl+A");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, editor_.CanUndo() ? MF_STRING : (MF_STRING | MF_GRAYED), CMD_UNDO, L"撤销\tCtrl+Z");
+        AppendMenuW(menu, editor_.CanRedo() ? MF_STRING : (MF_STRING | MF_GRAYED), CMD_REDO, L"重做\tCtrl+Y");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, CMD_SAVE, L"保存文件\tCtrl+S");
+        AppendMenuW(menu, MF_STRING, CMD_TOGGLE_EDIT, L"完成并返回阅读\tCtrl+E");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING | (config_.outline_visible ? MF_CHECKED : 0), CMD_TOGGLE_OUTLINE, L"显示侧栏大纲\tCtrl+B");
+        AppendMenuW(menu, MF_STRING, CMD_FIND, L"源码内搜索\tCtrl+F");
+        TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_LEFTALIGN, screen_pt.x, screen_pt.y, 0, hwnd_, nullptr);
+        DestroyMenu(menu);
+        return;
+    }
+
     AppendMenuW(menu, selection_.HasSelection() ? MF_STRING : (MF_STRING | MF_GRAYED), CMD_COPY, L"复制\tCtrl+C");
     AppendMenuW(menu, MF_STRING, CMD_SELECT_ALL, L"全选\tCtrl+A");
+    AppendMenuW(menu, MF_STRING, CMD_TOGGLE_EDIT, L"编辑源码\tCtrl+E");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, CMD_OPEN_FILE, L"打开文件...\tCtrl+O");
 
@@ -2168,6 +2599,20 @@ void MainWindow::OnMouseWheel(float x_dip, float y_dip, int delta, bool horizont
         float step = -static_cast<float>(delta) / 120.0f * (kOutlineRowH * 2.5f);
         outline_scroll_y_ = std::clamp(outline_scroll_y_ + step, 0.0f, MaxOutlineScrollY());
         InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+
+    if (edit_mode_) {
+        if (!horizontal) {
+            float step = -static_cast<float>(delta) / 120.0f * 88.0f;
+            editor_.ScrollBy(step);
+            if (!anim_timer_active_) {
+                anim_timer_active_ = true;
+                SetTimer(hwnd_, kTimerAnim, 15, nullptr);
+            }
+            UpdateImePosition();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
         return;
     }
 
@@ -2226,6 +2671,15 @@ void MainWindow::OnKeyDown(WPARAM vk) {
             selection_.Clear();
             InvalidateRect(hwnd_, nullptr, FALSE);
         }
+        return;
+    }
+
+    if (ctrl && vk == 'E') {
+        ToggleEditMode();
+        return;
+    }
+    if (ctrl && vk == 'S' && edit_mode_) {
+        SaveCurrentDocument(true);
         return;
     }
 
@@ -2346,6 +2800,64 @@ void MainWindow::OnKeyDown(WPARAM vk) {
         }
     }
 
+    if (edit_mode_ && !find_focused_) {
+        bool mutated = false;
+        bool handled = false;
+        if (ctrl) {
+            if (vk == 'O') { OpenFileDialog(); return; }
+            if (vk == 'F') { ShowFindBar(true); return; }
+            if (vk == 'B') { ToggleOutline(); return; }
+            if (vk == 'R') {
+                if (ConfirmDiscardOrSaveBeforeLeave()) ReloadCurrentFile(true);
+                return;
+            }
+            if (vk == 'C') {
+                if (editor_.HasSelection()) {
+                    CopyTextToClipboard(editor_.GetSelectedText(), L"已复制到剪贴板");
+                }
+                return;
+            }
+            if (vk == 'X') {
+                if (editor_.HasSelection()) {
+                    CopyTextToClipboard(editor_.GetSelectedText(), L"");
+                    editor_.DeleteSelection();
+                    editor_.EnsureCaretVisible();
+                    mutated = true;
+                }
+                handled = true;
+            } else if (vk == 'V') {
+                std::wstring pasted = ReadTextFromClipboard();
+                if (!pasted.empty()) {
+                    editor_.PasteText(pasted);
+                    editor_.EnsureCaretVisible();
+                    mutated = true;
+                }
+                handled = true;
+            } else if (vk == 'Z' || vk == 'Y') {
+                handled = editor_.OnKeyDown(vk, ctrl, shift, alt);
+                mutated = handled;
+            } else if (vk == VK_OEM_PLUS || vk == VK_ADD) { SetZoom(config_.zoom_percent + 10); return; }
+            else if (vk == VK_OEM_MINUS || vk == VK_SUBTRACT) { SetZoom(config_.zoom_percent - 10); return; }
+            else if (vk == '0' || vk == VK_NUMPAD0) { SetZoom(100); return; }
+        }
+        if (!handled) {
+            handled = editor_.OnKeyDown(vk, ctrl, shift, alt);
+            if (handled && (vk == VK_BACK || vk == VK_DELETE || vk == VK_RETURN || vk == VK_TAB)) {
+                mutated = true;
+            }
+        }
+        if (handled) {
+            editor_caret_visible_ = true;
+            if (mutated && find_visible_ && !find_query_.empty()) {
+                RunSearch(find_query_, false);
+            }
+            if (mutated) UpdateWindowTitle();
+            UpdateImePosition();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+    }
+
     if (ctrl) {
         if (vk == 'O') { OpenFileDialog(); return; }
         if (vk == 'F') { ShowFindBar(true); return; }
@@ -2411,7 +2923,7 @@ void MainWindow::OnDropFiles(HDROP hdrop) {
         std::wstring path(len + 1, L'\0');
         DragQueryFileW(hdrop, 0, path.data(), len + 1);
         path.resize(len);
-        if (!path.empty()) {
+        if (!path.empty() && ConfirmDiscardOrSaveBeforeLeave()) {
             OpenFile(path, true);
         }
     }
@@ -2420,6 +2932,15 @@ void MainWindow::OnDropFiles(HDROP hdrop) {
 
 void MainWindow::OnTimer(UINT_PTR id) {
     if (id == kTimerAnim) {
+        if (edit_mode_) {
+            if (!editor_.AnimateScroll()) {
+                KillTimer(hwnd_, kTimerAnim);
+                anim_timer_active_ = false;
+            }
+            UpdateImePosition();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
         float diff = target_scroll_y_ - scroll_y_;
         if (std::abs(diff) < 0.6f) {
             scroll_y_ = target_scroll_y_;
@@ -2461,6 +2982,11 @@ void MainWindow::OnTimer(UINT_PTR id) {
                 changed = layout_.ScrollTableBy(autoscroll_h_idx_, speed);
             } else if (autoscroll_h_kind_ == HScrollKind::Code) {
                 changed = layout_.ScrollCodeBlockBy(autoscroll_h_idx_, speed);
+            } else if (edit_mode_) {
+                float old_y = editor_.ScrollY();
+                editor_.SetScrollY(old_y + speed);
+                changed = (std::abs(editor_.ScrollY() - old_y) > 0.1f);
+                if (changed) UpdateImePosition();
             } else {
                 float old_y = scroll_y_;
                 scroll_y_ = target_scroll_y_ = std::clamp(scroll_y_ + speed, 0.0f, MaxDocScrollY());
@@ -2475,12 +3001,15 @@ void MainWindow::OnTimer(UINT_PTR id) {
         if (find_visible_ && find_focused_) {
             find_caret_visible_ = !find_caret_visible_;
             InvalidateRect(hwnd_, nullptr, FALSE);
+        } else if (edit_mode_ && !find_focused_) {
+            editor_caret_visible_ = !editor_caret_visible_;
+            InvalidateRect(hwnd_, nullptr, FALSE);
         }
         return;
     }
 
     if (id == kTimerWatch) {
-        if (watcher_.HasChanged()) {
+        if (watcher_.HasChanged() && !(edit_mode_ && editor_.IsModified())) {
             ReloadCurrentFile(true);
         }
         ULONGLONG now = GetTickCount64();
@@ -2579,6 +3108,7 @@ void MainWindow::HandleLinkClick(const std::wstring& url) {
     std::wstring resolved = ResolveDocumentResourcePath(doc_.base_dir, target);
     if (!resolved.empty() && GetFileAttributesW(resolved.c_str()) != INVALID_FILE_ATTRIBUTES) {
         if (IsMarkdownFileExt(resolved)) {
+            if (!ConfirmDiscardOrSaveBeforeLeave()) return;
             OpenFile(resolved, true);
             if (!anchor.empty()) {
                 float ay = 0.0f;
@@ -2593,6 +3123,7 @@ void MainWindow::HandleLinkClick(const std::wstring& url) {
 }
 
 void MainWindow::OpenFileDialog() {
+    if (!ConfirmDiscardOrSaveBeforeLeave()) return;
     ComPtr<IFileOpenDialog> dlg;
     if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(dlg.Put()))) && dlg) {
         COMDLG_FILTERSPEC filters[] = {
@@ -2630,6 +3161,7 @@ void MainWindow::OpenFileDialog() {
 void MainWindow::NavigateHistory(int dir) {
     int next = history_index_ + dir;
     if (next < 0 || next >= static_cast<int>(history_.size())) return;
+    if (!ConfirmDiscardOrSaveBeforeLeave()) return;
     history_index_ = next;
     OpenFile(history_[history_index_], false);
 }
@@ -2733,21 +3265,23 @@ void MainWindow::OnMButtonDown(float x_dip, float y_dip) {
     autoscroll_h_kind_ = HScrollKind::None;
     autoscroll_h_idx_ = -1;
 
-    const auto& tbls = layout_.Tables();
-    for (size_t i = 0; i < tbls.size(); ++i) {
-        if (tbls[i].max_scroll_x > 1.0f && RectContains(tbls[i].card_rect, doc_x, doc_y)) {
-            autoscroll_h_kind_ = HScrollKind::Table;
-            autoscroll_h_idx_ = static_cast<int>(i);
-            break;
-        }
-    }
-    if (autoscroll_h_kind_ == HScrollKind::None) {
-        const auto& cbs = layout_.CodeBlocks();
-        for (size_t i = 0; i < cbs.size(); ++i) {
-            if (cbs[i].max_scroll_x > 1.0f && RectContains(cbs[i].card_rect, doc_x, doc_y)) {
-                autoscroll_h_kind_ = HScrollKind::Code;
+    if (!edit_mode_) {
+        const auto& tbls = layout_.Tables();
+        for (size_t i = 0; i < tbls.size(); ++i) {
+            if (tbls[i].max_scroll_x > 1.0f && RectContains(tbls[i].card_rect, doc_x, doc_y)) {
+                autoscroll_h_kind_ = HScrollKind::Table;
                 autoscroll_h_idx_ = static_cast<int>(i);
                 break;
+            }
+        }
+        if (autoscroll_h_kind_ == HScrollKind::None) {
+            const auto& cbs = layout_.CodeBlocks();
+            for (size_t i = 0; i < cbs.size(); ++i) {
+                if (cbs[i].max_scroll_x > 1.0f && RectContains(cbs[i].card_rect, doc_x, doc_y)) {
+                    autoscroll_h_kind_ = HScrollKind::Code;
+                    autoscroll_h_idx_ = static_cast<int>(i);
+                    break;
+                }
             }
         }
     }

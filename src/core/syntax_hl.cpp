@@ -426,4 +426,279 @@ std::vector<SyntaxToken> HighlightCode(const std::wstring& code, const std::stri
     return tokens;
 }
 
+std::vector<MarkdownSpanStyle> HighlightMarkdownLine(const std::wstring& line, MarkdownFenceState& state) {
+    std::vector<MarkdownSpanStyle> spans;
+    const size_t n = line.size();
+    if (n == 0) return spans;
+
+    auto push = [&](size_t s, size_t len, TokenKind k, bool bold = false, bool italic = false) {
+        if (len == 0) return;
+        spans.push_back({static_cast<uint32_t>(s), static_cast<uint32_t>(len), k, bold, italic});
+    };
+
+    size_t ws = 0;
+    while (ws < n && (line[ws] == L' ' || line[ws] == L'\t')) ++ws;
+
+    // 1. Check opening / closing fenced code block (``` or ~~~)
+    if (!state.in_math_fence && ws < n && (line[ws] == L'`' || line[ws] == L'~') && ws < 4) {
+        wchar_t fc = line[ws];
+        size_t fl = 0;
+        while (ws + fl < n && line[ws + fl] == fc) ++fl;
+        if (fl >= 3) {
+            if (!state.in_code_fence) {
+                state.in_code_fence = true;
+                state.fence_char = fc;
+                state.fence_len = fl;
+                size_t lang_s = ws + fl;
+                while (lang_s < n && (line[lang_s] == L' ' || line[lang_s] == L'\t')) ++lang_s;
+                size_t lang_e = lang_s;
+                while (lang_e < n && !std::iswspace(line[lang_e])) ++lang_e;
+                state.fence_lang = WideToUtf8(line.substr(lang_s, lang_e - lang_s));
+                push(ws, fl, TokenKind::Comment);
+                if (lang_e > lang_s) push(lang_s, lang_e - lang_s, TokenKind::Type);
+                return spans;
+            }
+            if (fc == state.fence_char && fl >= state.fence_len) {
+                size_t k = ws + fl;
+                while (k < n && (line[k] == L' ' || line[k] == L'\t' || line[k] == L'\r')) ++k;
+                if (k == n) {
+                    state.in_code_fence = false;
+                    state.fence_lang.clear();
+                    push(ws, fl, TokenKind::Comment);
+                    return spans;
+                }
+            }
+        }
+    }
+
+    // 2. Interior of fenced code block -> reuse code highlighter directly
+    if (state.in_code_fence) {
+        std::string lang_lower = ToLowerAscii(state.fence_lang);
+        std::vector<SyntaxToken> code_toks = HighlightCode(
+            line, (lang_lower == "math" || lang_lower == "katex") ? "tex" : state.fence_lang);
+        spans.reserve(code_toks.size());
+        for (const auto& t : code_toks) {
+            spans.push_back({t.start, t.length, t.kind, false, false});
+        }
+        return spans;
+    }
+
+    // 3. Standalone $$ / \[ / \] math fence lines & interior TeX highlighting
+    size_t trim_end = n;
+    while (trim_end > ws && (line[trim_end - 1] == L' ' || line[trim_end - 1] == L'\t' || line[trim_end - 1] == L'\r')) {
+        --trim_end;
+    }
+    std::wstring trimmed = (trim_end > ws) ? line.substr(ws, trim_end - ws) : L"";
+    if (trimmed == L"$$" || (!state.in_math_fence && trimmed == L"\\[") || (state.in_math_fence && trimmed == L"\\]")) {
+        state.in_math_fence = !state.in_math_fence;
+        push(ws, trim_end - ws, TokenKind::Preprocessor, true, false);
+        return spans;
+    }
+    if (state.in_math_fence) {
+        std::vector<SyntaxToken> tex_toks = HighlightCode(line, "tex");
+        spans.reserve(tex_toks.size());
+        for (const auto& t : tex_toks) {
+            spans.push_back({t.start, t.length, t.kind, false, false});
+        }
+        return spans;
+    }
+
+    // 4. Horizontal rule (---, ***, ___)
+    if (trimmed.size() >= 3 && (trimmed[0] == L'-' || trimmed[0] == L'*' || trimmed[0] == L'_')) {
+        bool all_same = true;
+        int cnt = 0;
+        for (wchar_t ch : trimmed) {
+            if (ch == trimmed[0]) ++cnt;
+            else if (ch != L' ' && ch != L'\t') { all_same = false; break; }
+        }
+        if (all_same && cnt >= 3) {
+            push(ws, trim_end - ws, TokenKind::Comment);
+            return spans;
+        }
+    }
+
+    // 5. Block-level prefixes
+    size_t pos = ws;
+    bool is_heading = false;
+    // Headings (# .. ###### )
+    if (pos < n && line[pos] == L'#') {
+        size_t hashes = 0;
+        while (pos + hashes < n && hashes < 6 && line[pos + hashes] == L'#') ++hashes;
+        if (pos + hashes == n || line[pos + hashes] == L' ' || line[pos + hashes] == L'\t') {
+            is_heading = true;
+            push(pos, hashes, TokenKind::Preprocessor, true, false);
+            size_t body_s = pos + hashes;
+            if (body_s < n) {
+                push(body_s, n - body_s, TokenKind::Keyword, true, false);
+            }
+            pos = body_s;
+        }
+    }
+
+    if (!is_heading) {
+        // Blockquotes / callout > [!NOTE]
+        if (pos < n && line[pos] == L'>') {
+            while (pos < n && (line[pos] == L'>' || line[pos] == L' ')) {
+                if (line[pos] == L'>') push(pos, 1, TokenKind::Operator, true, false);
+                ++pos;
+            }
+            if (pos + 2 < n && line[pos] == L'[' && line[pos + 1] == L'!') {
+                size_t close_b = line.find(L']', pos + 2);
+                if (close_b != std::wstring::npos) {
+                    push(pos, close_b - pos + 1, TokenKind::Preprocessor, true, false);
+                    pos = close_b + 1;
+                }
+            }
+        }
+        // Lists: -, *, + or 1. and optional [ ] / [x]
+        if (pos + 1 < n && (line[pos] == L'-' || line[pos] == L'*' || line[pos] == L'+') &&
+            (line[pos + 1] == L' ' || line[pos + 1] == L'\t')) {
+            push(pos, 1, TokenKind::Operator, true, false);
+            pos += 2;
+            while (pos < n && (line[pos] == L' ' || line[pos] == L'\t')) ++pos;
+            if (pos + 2 < n && line[pos] == L'[' &&
+                (line[pos + 1] == L' ' || line[pos + 1] == L'x' || line[pos + 1] == L'X') &&
+                line[pos + 2] == L']') {
+                push(pos, 3, TokenKind::Number, true, false);
+                pos += 3;
+            }
+        } else if (pos < n && line[pos] >= L'0' && line[pos] <= L'9') {
+            size_t d = pos;
+            while (d < n && line[d] >= L'0' && line[d] <= L'9') ++d;
+            if (d + 1 < n && (line[d] == L'.' || line[d] == L')') &&
+                (line[d + 1] == L' ' || line[d + 1] == L'\t')) {
+                push(pos, d - pos + 1, TokenKind::Number, true, false);
+                pos = d + 2;
+            }
+        }
+    }
+
+    // 6. Inline Markdown constructs (`code`, $math$, **bold**, *italic*, [text](url), | pipes, <!-- -->)
+    size_t i = pos;
+    while (i < n) {
+        wchar_t ch = line[i];
+
+        if (ch == L'\\' && i + 1 < n) {
+            if (line[i + 1] == L'(' || line[i + 1] == L'[') {
+                const wchar_t* closer = (line[i + 1] == L'(') ? L"\\)" : L"\\]";
+                size_t close = line.find(closer, i + 2);
+                if (close != std::wstring::npos) {
+                    push(i, 2, TokenKind::Operator);
+                    push(i + 2, close - (i + 2), TokenKind::Type);
+                    push(close, 2, TokenKind::Operator);
+                    i = close + 2;
+                    continue;
+                }
+            }
+            i += 2;
+            continue;
+        }
+
+        // Inline code `...`
+        if (ch == L'`') {
+            size_t ticks = 0;
+            while (i + ticks < n && line[i + ticks] == L'`') ++ticks;
+            size_t s = i + ticks;
+            size_t close_pos = std::wstring::npos;
+            while (s < n) {
+                if (line[s] == L'`') {
+                    size_t ct = 0;
+                    while (s + ct < n && line[s + ct] == L'`') ++ct;
+                    if (ct == ticks) { close_pos = s + ct; break; }
+                    s += ct;
+                } else {
+                    ++s;
+                }
+            }
+            if (close_pos != std::wstring::npos) {
+                push(i, close_pos - i, TokenKind::Function);
+                i = close_pos;
+                continue;
+            }
+            i += ticks;
+            continue;
+        }
+
+        // HTML comment <!-- ... -->
+        if (ch == L'<' && i + 3 < n && line.compare(i, 4, L"<!--") == 0) {
+            size_t close = line.find(L"-->", i + 4);
+            size_t len = (close == std::wstring::npos) ? (n - i) : (close + 3 - i);
+            push(i, len, TokenKind::Comment);
+            i += len;
+            continue;
+        }
+
+        // Inline or single-line $$ ... $$ math
+        if (ch == L'$') {
+            bool dbl = (i + 1 < n && line[i + 1] == L'$');
+            size_t dlen = dbl ? 2 : 1;
+            size_t close = line.find(dbl ? L"$$" : L"$", i + dlen);
+            if (close != std::wstring::npos && close > i + dlen) {
+                push(i, dlen, TokenKind::Operator);
+                push(i + dlen, close - (i + dlen), TokenKind::Type);
+                push(close, dlen, TokenKind::Operator);
+                i = close + dlen;
+                continue;
+            }
+            ++i;
+            continue;
+        }
+
+        // Bold **...** / __...__
+        if ((ch == L'*' || ch == L'_') && i + 1 < n && line[i + 1] == ch) {
+            const wchar_t* delim = (ch == L'*') ? L"**" : L"__";
+            size_t close = line.find(delim, i + 2);
+            if (close != std::wstring::npos && close > i + 2) {
+                push(i, 2, TokenKind::Operator);
+                push(i + 2, close - (i + 2), is_heading ? TokenKind::Keyword : TokenKind::Normal, true, false);
+                push(close, 2, TokenKind::Operator);
+                i = close + 2;
+                continue;
+            }
+            i += 2;
+            continue;
+        }
+
+        // Italic *...*
+        if (ch == L'*' && (i + 1 < n && line[i + 1] != L' ' && line[i + 1] != L'*')) {
+            size_t close = line.find(L'*', i + 1);
+            if (close != std::wstring::npos && close > i + 1 && line[close - 1] != L' ') {
+                push(i, 1, TokenKind::Operator);
+                push(i + 1, close - (i + 1), is_heading ? TokenKind::Keyword : TokenKind::Normal, is_heading, true);
+                push(close, 1, TokenKind::Operator);
+                i = close + 1;
+                continue;
+            }
+        }
+
+        // Images & Links: ![alt](url) or [text](url)
+        if ((ch == L'!' && i + 1 < n && line[i + 1] == L'[') || ch == L'[') {
+            size_t lb = (ch == L'!') ? (i + 1) : i;
+            size_t rb = line.find(L']', lb + 1);
+            if (rb != std::wstring::npos && rb + 1 < n && line[rb + 1] == L'(') {
+                size_t rp = line.find(L')', rb + 2);
+                if (rp != std::wstring::npos) {
+                    if (ch == L'!') push(i, 1, TokenKind::Preprocessor);
+                    push(lb, 1, TokenKind::Operator);
+                    push(lb + 1, rb - (lb + 1), TokenKind::Function);
+                    push(rb, 2, TokenKind::Operator);
+                    push(rb + 2, rp - (rb + 2), TokenKind::String);
+                    push(rp, 1, TokenKind::Operator);
+                    i = rp + 1;
+                    continue;
+                }
+            }
+        }
+
+        // Table pipes
+        if (ch == L'|') {
+            push(i, 1, TokenKind::Operator);
+        }
+
+        ++i;
+    }
+
+    return spans;
+}
+
 }  // namespace mr

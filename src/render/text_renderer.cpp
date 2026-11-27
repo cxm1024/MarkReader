@@ -358,4 +358,42 @@ ULONG STDMETHODCALLTYPE D2DTextRenderer::Release() {
     return count;
 }
 
+const wchar_t* PickMonoFontFamily(IDWriteFactory5* dw) {
+    static std::wstring cached;
+    if (!cached.empty()) return cached.c_str();
+    cached = L"Consolas";
+    if (!dw) return cached.c_str();
+    ComPtr<IDWriteFontCollection1> sys;
+    if (SUCCEEDED(dw->GetSystemFontCollection(FALSE, sys.Put(), FALSE)) && sys) {
+        for (const wchar_t* cand : {L"Cascadia Code", L"Cascadia Mono", L"JetBrains Mono", L"Consolas"}) {
+            UINT32 idx = 0;
+            BOOL exists = FALSE;
+            if (SUCCEEDED(sys->FindFamilyName(cand, &idx, &exists)) && exists) {
+                cached = cand;
+                break;
+            }
+        }
+    }
+    return cached.c_str();
+}
+
+const wchar_t* PickUiFontFamily(IDWriteFactory5* dw) {
+    static std::wstring cached;
+    if (!cached.empty()) return cached.c_str();
+    cached = L"Segoe UI";
+    if (!dw) return cached.c_str();
+    ComPtr<IDWriteFontCollection1> sys;
+    if (SUCCEEDED(dw->GetSystemFontCollection(FALSE, sys.Put(), FALSE)) && sys) {
+        for (const wchar_t* cand : {L"Segoe UI Variable Text", L"Segoe UI", L"Microsoft YaHei UI"}) {
+            UINT32 idx = 0;
+            BOOL exists = FALSE;
+            if (SUCCEEDED(sys->FindFamilyName(cand, &idx, &exists)) && exists) {
+                cached = cand;
+                break;
+            }
+        }
+    }
+    return cached.c_str();
+}
+
 }  // namespace mr

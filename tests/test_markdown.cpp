@@ -2,8 +2,11 @@
 #include "core/sample_doc.h"
 #include "core/syntax_hl.h"
 #include "core/types.h"
+#include "ui/source_editor.h"
 
 #include <cassert>
+#include <cstdio>
+#include <filesystem>
 #include <iostream>
 #include <string>
 
@@ -164,12 +167,132 @@ static void TestWelcomeShowcaseDoc() {
     assert(task_items >= 5);
 }
 
+static void TestSourceLinesAndSaveRoundtrip() {
+    // Line 0: blank
+    // Line 1: # First Heading
+    // Line 2: $$
+    // Line 3: a = 1
+    // Line 4: (blank inside $$ collapsed by preprocessor)
+    // Line 5: b = 2
+    // Line 6: $$
+    // Line 7: ## Second Heading
+    // Line 8: | C1 | C2 |
+    // Line 9: | --- | --- |
+    // Line 10: | v1 | v2 |
+    const std::string md =
+        "\n"
+        "# First Heading\n"
+        "$$\n"
+        "a = 1\n"
+        "\n"
+        "b = 2\n"
+        "$$\n"
+        "## Second Heading\n"
+        "| C1 | C2 |\n"
+        "| --- | --- |\n"
+        "| v1 | v2 |\n";
+    auto doc = ParseMarkdownDocument(md, L"anchor_test.md");
+    assert(doc.outline.size() == 2);
+    assert(doc.outline[0].source_line == 1);
+    assert(doc.outline[1].source_line == 7);
+
+    bool saw_table = false;
+    for (const auto& b : doc.blocks) {
+        if (b.kind == Block::Kind::Table) {
+            saw_table = true;
+            assert(b.table_rows.size() == 2);
+            assert(b.table_rows[0].source_line == 8);
+            assert(b.table_rows[1].source_line == 10);
+        }
+    }
+    assert(saw_table);
+
+    std::filesystem::path tmp = std::filesystem::temp_directory_path() / "markreader_save_test.md";
+    std::wstring err;
+    const std::string payload = "# 测试保存\r\n包含中文与 $E=mc^2$ 公式。\r\n";
+    assert(SaveTextFileUtf8(tmp.wstring(), payload, err));
+    std::string loaded;
+    assert(LoadTextFileUtf8(tmp.wstring(), loaded, err));
+    assert(loaded == payload);
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
+}
+
+static void TestMarkdownSourceHighlighter() {
+    MarkdownFenceState st;
+    auto h = HighlightMarkdownLine(L"# 标题 [链接](https://example.com) $x^2$", st);
+    bool has_preproc = false, has_bold = false, has_string = false;
+    for (const auto& sp : h) {
+        if (sp.kind == TokenKind::Preprocessor) has_preproc = true;
+        if (sp.bold) has_bold = true;
+        if (sp.kind == TokenKind::String) has_string = true;
+    }
+    assert(has_preproc && has_bold && has_string);
+
+    auto f0 = HighlightMarkdownLine(L"```cpp", st);
+    (void)f0;
+    assert(st.in_code_fence && st.fence_lang == "cpp");
+    auto c1 = HighlightMarkdownLine(L"int val = 42;", st);
+    bool saw_kw = false, saw_num = false;
+    for (const auto& sp : c1) {
+        if (sp.kind == TokenKind::Keyword) saw_kw = true;
+        if (sp.kind == TokenKind::Number) saw_num = true;
+    }
+    assert(saw_kw && saw_num);
+    HighlightMarkdownLine(L"```", st);
+    assert(!st.in_code_fence);
+}
+
+static void TestSourceEditorUndoRedoAndFind() {
+    SourceEditor ed;
+    // 1. Coalesced typing + space boundary Undo/Redo & IsModified tracking (LF preserved)
+    ed.SetDocument("alpha\nbeta\ngamma");
+    assert(!ed.IsModified());
+    assert(ed.OnChar(L'X'));
+    assert(ed.OnChar(L'Y'));
+    assert(ed.OnChar(L' '));
+    assert(ed.IsModified());
+    assert(ed.GetUtf8() == "XY alpha\nbeta\ngamma");
+
+    assert(ed.Undo());
+    assert(ed.GetUtf8() == "XYalpha\nbeta\ngamma");
+    assert(ed.Undo());
+    assert(ed.GetUtf8() == "alpha\nbeta\ngamma");
+    assert(!ed.IsModified());
+
+    // Regression test: Redo must restore the new text rather than deleting the line
+    assert(ed.Redo());
+    assert(ed.GetUtf8() == "XYalpha\nbeta\ngamma");
+    assert(ed.Redo());
+    assert(ed.GetUtf8() == "XY alpha\nbeta\ngamma");
+    assert(ed.IsModified());
+
+    // 2. Multi-line selection + replace + Undo/Redo + Find + CRLF preservation
+    SourceEditor crlf_ed;
+    crlf_ed.SetDocument("hello world\r\nsecond line\r\n");
+    crlf_ed.SelectAll();
+    crlf_ed.PasteText(L"ONE\nTWO\nTHREE");
+    assert(crlf_ed.GetUtf8() == "ONE\r\nTWO\r\nTHREE");
+    assert(crlf_ed.Undo());
+    assert(crlf_ed.GetUtf8() == "hello world\r\nsecond line\r\n");
+    assert(!crlf_ed.IsModified());
+    assert(crlf_ed.Redo());
+    assert(crlf_ed.GetUtf8() == "ONE\r\nTWO\r\nTHREE");
+
+    auto matches = crlf_ed.FindAllMatches(L"two");
+    assert(matches.size() == 1);
+    assert(matches[0].line == 1 && matches[0].start == 0 && matches[0].length == 3);
+}
+
 int main() {
     TestMarkdownOutlineAndSlugs();
     TestInlineAndDisplayMath();
     TestImagesTablesAndAdmonitions();
     TestSyntaxHighlighter();
     TestWelcomeShowcaseDoc();
+    TestSourceLinesAndSaveRoundtrip();
+    TestMarkdownSourceHighlighter();
+    TestSourceEditorUndoRedoAndFind();
     std::cout << "All MarkReader unit tests passed.\n";
     return 0;
 }

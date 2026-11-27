@@ -10,44 +10,6 @@ namespace mr {
 
 namespace {
 
-const wchar_t* PickMonoFontFamily(IDWriteFactory5* dw) {
-    static std::wstring cached;
-    if (!cached.empty()) return cached.c_str();
-    cached = L"Consolas";
-    if (!dw) return cached.c_str();
-    ComPtr<IDWriteFontCollection1> sys;
-    if (SUCCEEDED(dw->GetSystemFontCollection(FALSE, sys.Put(), FALSE)) && sys) {
-        for (const wchar_t* cand : {L"Cascadia Code", L"Cascadia Mono", L"JetBrains Mono", L"Consolas"}) {
-            UINT32 idx = 0;
-            BOOL exists = FALSE;
-            if (SUCCEEDED(sys->FindFamilyName(cand, &idx, &exists)) && exists) {
-                cached = cand;
-                break;
-            }
-        }
-    }
-    return cached.c_str();
-}
-
-const wchar_t* PickUiFontFamily(IDWriteFactory5* dw) {
-    static std::wstring cached;
-    if (!cached.empty()) return cached.c_str();
-    cached = L"Segoe UI";
-    if (!dw) return cached.c_str();
-    ComPtr<IDWriteFontCollection1> sys;
-    if (SUCCEEDED(dw->GetSystemFontCollection(FALSE, sys.Put(), FALSE)) && sys) {
-        for (const wchar_t* cand : {L"Segoe UI Variable Text", L"Segoe UI", L"Microsoft YaHei UI"}) {
-            UINT32 idx = 0;
-            BOOL exists = FALSE;
-            if (SUCCEEDED(sys->FindFamilyName(cand, &idx, &exists)) && exists) {
-                cached = cand;
-                break;
-            }
-        }
-    }
-    return cached.c_str();
-}
-
 ComPtr<IDWriteTextLayout> MakeSimpleLabel(
     IDWriteFactory5* dw,
     const std::wstring& text,
@@ -299,6 +261,7 @@ void DocumentLayout::Build(
     selectables_.clear();
     headings_.clear();
     anchor_map_.clear();
+    line_anchors_.clear();
 
     auto* d2d = D2DContext::Instance();
     if (!d2d || !d2d->DWrite()) {
@@ -390,22 +353,37 @@ float DocumentLayout::LayoutBlock(
                 decor_behind_.push_back(line);
                 end_y += 3.0f * ctx.scale;
             }
+            RecordSourceAnchor(b.source_line, b.source_line, hy, end_y);
             return end_y;
         }
 
         case Block::Kind::Paragraph: {
             D2D1_COLOR_F col = in_quote ? ctx.theme->blockquote_text : ctx.theme->text_primary;
-            return LayoutParagraphItem(b.inline_content, x, y, width, ctx.body_size, false, 0, col, ctx);
+            float end_y = LayoutParagraphItem(b.inline_content, x, y, width, ctx.body_size, false, 0, col, ctx);
+            int extra_lines = static_cast<int>(std::count(b.inline_content.plain_text.begin(), b.inline_content.plain_text.end(), L'\n'));
+            RecordSourceAnchor(b.source_line, b.source_line + extra_lines, y, end_y);
+            return end_y;
         }
 
-        case Block::Kind::CodeBlock:
-            return LayoutCodeBlock(b, x, y, width, ctx);
+        case Block::Kind::CodeBlock: {
+            float end_y = LayoutCodeBlock(b, x, y, width, ctx);
+            int extra_lines = static_cast<int>(std::count(b.code_text.begin(), b.code_text.end(), L'\n'));
+            RecordSourceAnchor(b.source_line, b.source_line + extra_lines + 1, y, end_y);
+            return end_y;
+        }
 
-        case Block::Kind::DisplayMath:
-            return LayoutDisplayMath(b, x, y, width, ctx);
+        case Block::Kind::DisplayMath: {
+            float end_y = LayoutDisplayMath(b, x, y, width, ctx);
+            int extra_lines = static_cast<int>(std::count(b.math_tex.begin(), b.math_tex.end(), L'\n'));
+            RecordSourceAnchor(b.source_line, b.source_line + extra_lines, y, end_y);
+            return end_y;
+        }
 
-        case Block::Kind::Image:
-            return LayoutImageBlock(b, x, y, width, ctx);
+        case Block::Kind::Image: {
+            float end_y = LayoutImageBlock(b, x, y, width, ctx);
+            RecordSourceAnchor(b.source_line, b.source_line, y, end_y);
+            return end_y;
+        }
 
         case Block::Kind::ThematicBreak: {
             float mid_y = y + 8.0f * ctx.scale;
@@ -414,7 +392,9 @@ float DocumentLayout::LayoutBlock(
             line.rect = D2D1::RectF(x, mid_y, x + width, mid_y + 1.0f);
             line.fill = ctx.theme->hr_color;
             decor_behind_.push_back(line);
-            return mid_y + 9.0f * ctx.scale;
+            float end_y = mid_y + 9.0f * ctx.scale;
+            RecordSourceAnchor(b.source_line, b.source_line, y, end_y);
+            return end_y;
         }
 
         case Block::Kind::BlockQuote: {
@@ -529,7 +509,10 @@ float DocumentLayout::LayoutBlock(
                 }
 
                 float item_y = LayoutBlockList(item.children, x + indent, cur_y, std::max(80.0f, width - indent), ctx, list_depth + 1, true);
-                if (item_y <= cur_y) item_y = cur_y + ctx.body_size * 1.4f;
+                if (item_y <= cur_y) {
+                    item_y = cur_y + ctx.body_size * 1.4f;
+                    RecordSourceAnchor(item.source_line, item.source_line, cur_y, item_y);
+                }
                 cur_y = item_y;
                 if (i + 1 < b.list_items.size()) {
                     cur_y += (b.list_tight ? 4.0f : 8.0f) * ctx.scale;
@@ -1127,6 +1110,7 @@ float DocumentLayout::LayoutTable(
             cur_x += cw;
         }
 
+        RecordSourceAnchor(row.source_line, row.source_line, cur_y, cur_y + row_h);
         tbl.rows.push_back(std::move(trow));
         cur_y += row_h;
     }
@@ -1925,6 +1909,70 @@ float DocumentLayout::ResolveScrollAnchor(const ScrollAnchor& anchor) const {
             break;
     }
     return 0.0f;
+}
+
+void DocumentLayout::RecordSourceAnchor(int line_start, int line_end, float y_top, float y_bottom) {
+    if (line_start < 0) line_start = 0;
+    if (line_end < line_start) line_end = line_start;
+    if (y_bottom < y_top) y_bottom = y_top;
+    line_anchors_.push_back({line_start, line_end, y_top, y_bottom});
+}
+
+int DocumentLayout::CaptureSourceLineAtY(float scroll_y) const {
+    if (line_anchors_.empty() || scroll_y <= 1.0f) return 0;
+    const float probe_y = scroll_y + 20.0f * scale_;
+    for (size_t i = 0; i < line_anchors_.size(); ++i) {
+        const auto& a = line_anchors_[i];
+        if (probe_y <= a.y_bottom) {
+            if (probe_y <= a.y_top) {
+                if (i > 0) {
+                    const auto& prev = line_anchors_[i - 1];
+                    float gap = a.y_top - prev.y_bottom;
+                    if (gap > 1.0f && a.line_start > prev.line_end) {
+                        float t = std::clamp((probe_y - prev.y_bottom) / gap, 0.0f, 1.0f);
+                        return prev.line_end + static_cast<int>(std::round(t * static_cast<float>(a.line_start - prev.line_end)));
+                    }
+                }
+                return a.line_start;
+            }
+            if (a.line_end > a.line_start && (a.y_bottom - a.y_top) > 1.0f) {
+                float t = std::clamp((probe_y - a.y_top) / (a.y_bottom - a.y_top), 0.0f, 1.0f);
+                return a.line_start + static_cast<int>(std::round(t * static_cast<float>(a.line_end - a.line_start)));
+            }
+            return a.line_start;
+        }
+    }
+    return line_anchors_.back().line_end;
+}
+
+float DocumentLayout::ResolveYForSourceLine(int source_line) const {
+    if (line_anchors_.empty() || source_line <= 0) return 0.0f;
+    const float top_pad = 20.0f * scale_;
+    // Find nearest anchors bracketing source_line (document layout emits non-decreasing block order)
+    const SourceLineAnchor* prev_below = nullptr;
+    for (const auto& a : line_anchors_) {
+        if (source_line >= a.line_start && source_line <= a.line_end) {
+            float y = a.y_top;
+            if (a.line_end > a.line_start) {
+                float t = static_cast<float>(source_line - a.line_start) / static_cast<float>(a.line_end - a.line_start);
+                y = a.y_top + t * (a.y_bottom - a.y_top);
+            }
+            return std::max(0.0f, y - top_pad);
+        }
+        if (a.line_start > source_line) {
+            if (prev_below && a.line_start > prev_below->line_end) {
+                float t = static_cast<float>(source_line - prev_below->line_end) /
+                          static_cast<float>(a.line_start - prev_below->line_end);
+                float y = prev_below->y_bottom + t * (a.y_top - prev_below->y_bottom);
+                return std::max(0.0f, y - top_pad);
+            }
+            return std::max(0.0f, a.y_top - top_pad);
+        }
+        if (!prev_below || a.line_end >= prev_below->line_end) {
+            prev_below = &a;
+        }
+    }
+    return std::max(0.0f, line_anchors_.back().y_bottom - top_pad);
 }
 
 bool DocumentLayout::ScrollCodeBlockBy(int code_idx, float dx) {

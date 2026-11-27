@@ -62,6 +62,7 @@ struct TableCell {
 
 struct TableRow {
     bool is_header = false;
+    int source_line = 0;
     std::vector<TableCell> cells;
 };
 
@@ -70,6 +71,7 @@ struct Block;
 struct ListItem {
     bool is_task = false;
     bool task_checked = false;
+    int source_line = 0;
     std::vector<Block> children;
 };
 
@@ -89,6 +91,7 @@ struct Block {
     };
 
     Kind kind = Kind::Paragraph;
+    int source_line = 0;
 
     // Heading
     int heading_level = 1;
@@ -134,6 +137,7 @@ struct OutlineEntry {
     int heading_id = 0;
     std::wstring title;
     std::string slug;
+    int source_line = 0;
 };
 
 struct DocumentStats {

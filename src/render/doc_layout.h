@@ -219,6 +219,8 @@ public:
     int FindActiveHeadingId(float scroll_y) const;
     ScrollAnchor CaptureScrollAnchor(float scroll_y) const;
     float ResolveScrollAnchor(const ScrollAnchor& anchor) const;
+    int CaptureSourceLineAtY(float scroll_y) const;
+    float ResolveYForSourceLine(int source_line) const;
 
     float TotalHeight() const { return total_height_; }
     float ContentLeft() const { return content_left_; }
@@ -266,6 +268,15 @@ private:
     std::vector<SelectableSlot> selectables_;
     std::vector<HeadingPosition> headings_;
     std::unordered_map<std::string, float> anchor_map_;
+    struct SourceLineAnchor {
+        int line_start = 0;
+        int line_end = 0;
+        float y_top = 0.0f;
+        float y_bottom = 0.0f;
+    };
+    std::vector<SourceLineAnchor> line_anchors_;
+
+    void RecordSourceAnchor(int line_start, int line_end, float y_top, float y_bottom);
 
     float total_height_ = 0.0f;
     float content_left_ = 0.0f;

@@ -295,6 +295,41 @@ bool LoadTextFileUtf8(const std::wstring& path, std::string& out_utf8, std::wstr
     return true;
 }
 
+bool SaveTextFileUtf8(const std::wstring& path, const std::string& utf8, std::wstring& out_error) {
+    out_error.clear();
+    if (path.empty()) {
+        out_error = L"文件路径为空";
+        return false;
+    }
+
+    // Write via CreateFileW (CREATE_ALWAYS) directly on target path so NTFS/hardlink attributes preserve cleanly,
+    // falling back to an error message on locked/read-only files without losing the user's open editor buffer.
+    HANDLE hFile = CreateFileW(
+        path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        DWORD err = GetLastError();
+        out_error = L"无法写入文件 (错误码 " + std::to_wstring(err) + L")";
+        return false;
+    }
+
+    size_t total_written = 0;
+    while (total_written < utf8.size()) {
+        DWORD chunk = static_cast<DWORD>(std::min<size_t>(utf8.size() - total_written, 4 * 1024 * 1024));
+        DWORD written = 0;
+        if (!WriteFile(hFile, utf8.data() + total_written, chunk, &written, nullptr) || written == 0) {
+            DWORD err = GetLastError();
+            CloseHandle(hFile);
+            out_error = L"写入文件失败 (错误码 " + std::to_wstring(err) + L")";
+            return false;
+        }
+        total_written += written;
+    }
+
+    FlushFileBuffers(hFile);
+    CloseHandle(hFile);
+    return true;
+}
+
 static std::wstring GetConfigPath() {
     PWSTR app_data = nullptr;
     std::wstring base;
