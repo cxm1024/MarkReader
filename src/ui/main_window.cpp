@@ -20,6 +20,8 @@ constexpr UINT_PTR kTimerAnim = 1;
 constexpr UINT_PTR kTimerWatch = 2;
 constexpr UINT_PTR kTimerCaret = 3;
 constexpr UINT_PTR kTimerAutoScroll = 4;
+constexpr UINT_PTR kTimerResize = 5;
+constexpr UINT kResizeIntervalMs = 16;
 
 constexpr float kToolbarH = 44.0f;
 constexpr float kSplitterW = 5.0f;
@@ -527,17 +529,26 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             BeginPaint(hwnd_, &ps);
-            Render();
+            if (!IsIconic(hwnd_) && !resize_timer_active_) {
+                if (!resize_pending_ || ApplyResize()) Render();
+            }
             EndPaint(hwnd_, &ps);
             return 0;
         }
 
+        case WM_ENTERSIZEMOVE:
+            in_size_move_ = true;
+            return 0;
+
+        case WM_EXITSIZEMOVE:
+            in_size_move_ = false;
+            KillTimer(hwnd_, kTimerResize);
+            resize_timer_active_ = false;
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+
         case WM_SIZE: {
-            if (wp != SIZE_MINIMIZED) {
-                UINT cw = LOWORD(lp);
-                UINT ch = HIWORD(lp);
-                OnSize(cw, ch);
-            }
+            if (wp != SIZE_MINIMIZED) QueueResize();
             return 0;
         }
 
@@ -799,6 +810,7 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         case WM_DESTROY: {
+            KillTimer(hwnd_, kTimerResize);
             KillTimer(hwnd_, kTimerAnim);
             KillTimer(hwnd_, kTimerWatch);
             KillTimer(hwnd_, kTimerCaret);
@@ -1545,7 +1557,7 @@ void MainWindow::Render() {
         RenderLightbox(dc, brush.Get(), t);
     }
 
-    d2d_.EndDraw();
+    d2d_.EndDraw(t.bg_canvas);
 }
 
 void MainWindow::RenderToolbar(
@@ -1988,20 +2000,43 @@ void MainWindow::RenderLightbox(ID2D1DeviceContext5* dc, ID2D1SolidColorBrush* b
     }
 }
 
-void MainWindow::OnSize(UINT width_px, UINT height_px) {
-    dpi_ = static_cast<float>(GetDpiForWindow(hwnd_));
-    if (dpi_ <= 0.0f) dpi_ = 96.0f;
+void MainWindow::QueueResize() {
+    resize_pending_ = true;
+    if (!resize_timer_active_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+bool MainWindow::ApplyResize() {
+    RECT client{};
+    if (!GetClientRect(hwnd_, &client)) return false;
+    const UINT width_px = client.right - client.left;
+    const UINT height_px = client.bottom - client.top;
+    const UINT window_dpi = GetDpiForWindow(hwnd_);
+    const float new_dpi = window_dpi ? static_cast<float>(window_dpi) : 96.0f;
+    if (in_size_move_) {
+        resize_timer_active_ = SetTimer(hwnd_, kTimerResize, kResizeIntervalMs, nullptr) != 0;
+    }
+    if (!d2d_.Resize(width_px, height_px, new_dpi)) return false;
+
+    const float old_dpi = dpi_;
+    const float old_width = client_w_dip_;
+    resize_pending_ = false;
+    dpi_ = new_dpi;
     client_w_dip_ = PxToDip(static_cast<int>(width_px));
     client_h_dip_ = PxToDip(static_cast<int>(height_px));
 
-    d2d_.Resize(width_px, height_px, dpi_);
-    RebuildLayout(true);
+    if (client_w_dip_ != old_width || dpi_ != old_dpi) {
+        RebuildLayout(true);
+    } else {
+        const float max_scroll = MaxDocScrollY();
+        scroll_y_ = std::clamp(scroll_y_, 0.0f, max_scroll);
+        target_scroll_y_ = std::clamp(target_scroll_y_, 0.0f, max_scroll);
+    }
+    outline_scroll_y_ = std::clamp(outline_scroll_y_, 0.0f, MaxOutlineScrollY());
     UpdateImePosition();
-    InvalidateRect(hwnd_, nullptr, FALSE);
+    return true;
 }
 
 void MainWindow::OnDpiChanged(UINT new_dpi, const RECT* suggested_rect) {
-    dpi_ = static_cast<float>(new_dpi);
     if (suggested_rect) {
         SetWindowPos(
             hwnd_, nullptr,
@@ -2011,9 +2046,7 @@ void MainWindow::OnDpiChanged(UINT new_dpi, const RECT* suggested_rect) {
             SWP_NOZORDER | SWP_NOACTIVATE);
     }
     UpdateDwmAppearance();
-    RebuildLayout(true);
-    UpdateImePosition();
-    InvalidateRect(hwnd_, nullptr, FALSE);
+    if (dpi_ != static_cast<float>(new_dpi) && !IsIconic(hwnd_)) QueueResize();
 }
 
 void MainWindow::OnMouseMove(float x_dip, float y_dip, WPARAM wp) {
@@ -2931,6 +2964,14 @@ void MainWindow::OnDropFiles(HDROP hdrop) {
 }
 
 void MainWindow::OnTimer(UINT_PTR id) {
+    if (id == kTimerResize) {
+        if (resize_timer_active_) {
+            KillTimer(hwnd_, kTimerResize);
+            resize_timer_active_ = false;
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
+        return;
+    }
     if (id == kTimerAnim) {
         if (edit_mode_) {
             if (!editor_.AnimateScroll()) {

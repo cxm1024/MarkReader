@@ -195,7 +195,7 @@ bool D2DContext::BeginDraw() {
     return true;
 }
 
-bool D2DContext::EndDraw() {
+bool D2DContext::EndDraw(const D2D1_COLOR_F& background) {
     if (!d2d_dc_ || !swap_chain_) return false;
     HRESULT hr = d2d_dc_->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
@@ -212,6 +212,9 @@ bool D2DContext::EndDraw() {
     }
     if (FAILED(hr)) return false;
 
+    // Match the canvas color where the current buffer does not cover the window.
+    const DXGI_RGBA color{background.r, background.g, background.b, 1.0f};
+    swap_chain_->SetBackgroundColor(&color);
     hr = swap_chain_->Present(1, 0);
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
         Resize(width_, height_, dpi_);

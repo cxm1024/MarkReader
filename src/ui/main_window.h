@@ -66,7 +66,8 @@ private:
     void RenderLightbox(ID2D1DeviceContext5* dc, ID2D1SolidColorBrush* brush, const ThemePalette& t);
     void RenderOverlays(ID2D1DeviceContext5* dc, ID2D1SolidColorBrush* brush, const ThemePalette& t, const D2D1_RECT_F& viewport);
 
-    void OnSize(UINT width_px, UINT height_px);
+    void QueueResize();
+    bool ApplyResize();
     void OnDpiChanged(UINT new_dpi, const RECT* suggested_rect);
     void OnMouseMove(float x_dip, float y_dip, WPARAM wp);
     void OnLButtonDown(float x_dip, float y_dip, WPARAM wp);
@@ -120,6 +121,9 @@ private:
     HIMC saved_himc_ = nullptr;
 
     float dpi_ = 96.0f;
+    bool in_size_move_ = false;
+    bool resize_pending_ = false;
+    bool resize_timer_active_ = false;
     float client_w_dip_ = 1240.0f;
     float client_h_dip_ = 840.0f;
 

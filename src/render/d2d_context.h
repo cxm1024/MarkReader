@@ -25,7 +25,7 @@ public:
     void Shutdown();
 
     bool BeginDraw();
-    bool EndDraw();
+    bool EndDraw(const D2D1_COLOR_F& background);
 
     ID2D1DeviceContext5* D2D() const { return d2d_dc_.Get(); }
     ID2D1Factory4* D2DFactory() const { return d2d_factory_.Get(); }
