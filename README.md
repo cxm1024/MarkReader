@@ -5,6 +5,7 @@
 [![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
 
 专注纯阅读体验的极简原生 Windows Markdown 阅读器。  
+
 拒绝 Electron / WebView 浏览器套壳，基于 **C++20 + Win32 + Direct3D 11 + Direct2D 1.3 / DirectWrite + WIC** 从零构建。
 
 > **开发声明**：本项目全部应用程序源码、Direct2D 排版渲染引擎、MicroTeX Direct2D 后端以及自解压安装/卸载器均由 **Gemini 4 Hydrogen** 编写与构建验证。
