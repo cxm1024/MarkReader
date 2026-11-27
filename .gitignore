@@ -1,0 +1,23 @@
+# Build outputs & CMake artifacts
+/build/
+/out/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+*.obj
+*.res
+*.a
+*.exe
+*.bin
+
+# IDE / editor local state
+.vs/
+.vscode/
+*.user
+*.suo
+*.log
+*.tmp
+settings.ini

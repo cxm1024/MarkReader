@@ -1,0 +1,4 @@
+#include <winresrc.h>
+
+1 24 "uninstall.manifest"
+101 ICON "../resources/app.ico"
