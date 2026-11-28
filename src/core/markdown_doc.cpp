@@ -52,6 +52,7 @@ static std::string PreprocessMarkdownMathWithLineMap(const std::string& input, s
     while (i < n) {
         if (is_line_start(i)) {
             // Check code fence line (``` or ~~~)
+            const bool was_in_fence = in_fence;
             size_t ws = i;
             while (ws < n && (input[ws] == ' ' || input[ws] == '\t') && (ws - i) < 4) ++ws;
             if (!in_display_dollar_fence && !in_bracket_display_fence &&
@@ -75,7 +76,8 @@ static std::string PreprocessMarkdownMathWithLineMap(const std::string& input, s
                 }
             }
 
-            if (in_fence) {
+            // Copy closing fences too, so their backticks cannot start an inline code span.
+            if (in_fence || was_in_fence) {
                 size_t eol = input.find('\n', i);
                 if (eol == std::string::npos) {
                     append_and_track(i, n - i);

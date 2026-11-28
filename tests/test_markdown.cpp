@@ -1,3 +1,6 @@
+// Keep test assertions active in Release builds.
+#undef NDEBUG
+
 #include "core/markdown_doc.h"
 #include "core/sample_doc.h"
 #include "core/syntax_hl.h"
@@ -87,6 +90,28 @@ int x = 1;
     }
     assert(adj_math == 4);
     assert(saw_literal_money);
+}
+
+static void TestConsecutiveCodeFences() {
+    for (const std::string fence : {"```", "~~~", "````"}) {
+        for (const std::string newline : {"\n", "\r\n"}) {
+            const std::string md =
+                fence + newline + "\\(first\\)" + newline + fence + newline +
+                "\\(outside\\)" + newline +
+                fence + newline + "\\[second\\]" + newline + fence;
+            const auto doc = ParseMarkdownDocument(md);
+            assert(doc.blocks.size() == 3);
+            assert(doc.blocks[0].kind == Block::Kind::CodeBlock);
+            assert(doc.blocks[0].code_text == L"\\(first\\)");
+            assert(doc.blocks[1].kind == Block::Kind::Paragraph);
+            assert(doc.blocks[1].source_line == 3);
+            assert(doc.blocks[1].inline_content.runs.size() == 1);
+            assert(doc.blocks[1].inline_content.runs[0].kind == InlineRun::Kind::InlineMath);
+            assert(doc.blocks[1].inline_content.runs[0].text == L"outside");
+            assert(doc.blocks[2].kind == Block::Kind::CodeBlock);
+            assert(doc.blocks[2].code_text == L"\\[second\\]");
+        }
+    }
 }
 
 static void TestImagesTablesAndAdmonitions() {
@@ -287,6 +312,7 @@ static void TestSourceEditorUndoRedoAndFind() {
 int main() {
     TestMarkdownOutlineAndSlugs();
     TestInlineAndDisplayMath();
+    TestConsecutiveCodeFences();
     TestImagesTablesAndAdmonitions();
     TestSyntaxHighlighter();
     TestWelcomeShowcaseDoc();
