@@ -10,7 +10,7 @@
 
 > **开发声明**：本项目全部应用程序源码、Direct2D 排版渲染引擎、MicroTeX Direct2D 后端以及自解压安装/卸载器均由 **Gemini 4 Hydrogen** 编写与构建验证。
 
-<img width="2560" height="1516" alt="image" src="https://github.com/user-attachments/assets/a4b4fcaa-0671-4e83-96d1-fcca27168805" />
+<img width="2560" height="1516" alt="image" src="https://github.com/user-attachments/assets/5f63a50f-6b6d-4ac4-939a-c25833a943e5" />
 
 ---
 
