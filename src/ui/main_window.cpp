@@ -366,6 +366,9 @@ MainWindow::~MainWindow() = default;
 bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, const std::wstring& initial_file) {
     hinst_ = hinst;
     config_ = LoadAppConfig();
+    if (config_.window_maximized && nCmdShow == SW_SHOWNORMAL) {
+        nCmdShow = SW_SHOWMAXIMIZED;
+    }
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -398,7 +401,8 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, const std::wstring& initi
         WS_EX_ACCEPTFILES,
         wc.lpszClassName,
         L"MarkReader",
-        WS_OVERLAPPEDWINDOW,
+        // Set the final state while hidden, before sizing the client area and swap chain.
+        WS_OVERLAPPEDWINDOW | (nCmdShow == SW_SHOWMAXIMIZED ? WS_MAXIMIZE : 0),
         x, y, w, h,
         nullptr, nullptr, hinst_, this);
     if (!hwnd_) return false;
@@ -435,12 +439,19 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, const std::wstring& initi
 
     SetTimer(hwnd_, kTimerWatch, 800, nullptr);
 
-    if (config_.window_maximized && nCmdShow == SW_SHOWNORMAL) {
-        ShowWindow(hwnd_, SW_SHOWMAXIMIZED);
-    } else {
-        ShowWindow(hwnd_, nCmdShow);
-    }
+    // Avoid DWM's opening stretch on the custom frame when starting maximized.
+    BOOL disable_transitions = TRUE;
+    const bool restore_transitions = nCmdShow == SW_SHOWMAXIMIZED && SUCCEEDED(
+        DwmSetWindowAttribute(hwnd_, DWMWA_TRANSITIONS_FORCEDISABLED,
+                              &disable_transitions, sizeof(disable_transitions)));
+    ShowWindow(hwnd_, nCmdShow);
     UpdateWindow(hwnd_);
+    if (restore_transitions) {
+        DwmFlush();  // Wait for the first frame before enabling subsequent transitions.
+        disable_transitions = FALSE;
+        DwmSetWindowAttribute(hwnd_, DWMWA_TRANSITIONS_FORCEDISABLED,
+                              &disable_transitions, sizeof(disable_transitions));
+    }
     return true;
 }
 
