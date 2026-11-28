@@ -289,14 +289,16 @@ bool ExtractHtmlAttr(const std::string& tag, const char* attr_name, std::string&
     return false;
 }
 
-void FinalizeParagraphPlainText(ParagraphData& p) {
+void FinalizeParagraphPlainText(ParagraphData& p, std::vector<OutlineEntry::MathRange>* math_ranges = nullptr) {
     p.plain_text.clear();
     for (const auto& run : p.runs) {
         if (run.kind == InlineRun::Kind::LineBreak) {
             p.plain_text.push_back(L'\n');
-        } else if (run.kind == InlineRun::Kind::InlineImage) {
-            if (!run.text.empty()) p.plain_text.append(run.text);
         } else {
+            if (math_ranges && run.kind == InlineRun::Kind::InlineMath && !run.text.empty()) {
+                math_ranges->push_back({static_cast<uint32_t>(p.plain_text.size()),
+                                        static_cast<uint32_t>(run.text.size())});
+            }
             p.plain_text.append(run.text);
         }
     }
@@ -885,7 +887,8 @@ int OnLeaveBlock(MD_BLOCKTYPE type, void* /*detail*/, void* userdata) {
                 para = std::move(b->para_segments[0].para);
             }
             b->para_segments.clear();
-            FinalizeParagraphPlainText(para);
+            std::vector<OutlineEntry::MathRange> math_ranges;
+            FinalizeParagraphPlainText(para, &math_ranges);
 
             std::string raw_slug = SlugifyHeading(WideToUtf8(para.plain_text));
             if (raw_slug.empty()) raw_slug = "section";
@@ -895,7 +898,8 @@ int OnLeaveBlock(MD_BLOCKTYPE type, void* /*detail*/, void* userdata) {
 
             int src_line = (b->current_block_line >= 0) ? b->current_block_line : b->last_orig_line;
             int hid = static_cast<int>(b->doc.outline.size());
-            b->doc.outline.push_back({b->current_heading_level, hid, para.plain_text, unique_slug, src_line});
+            b->doc.outline.push_back({b->current_heading_level, hid, para.plain_text, unique_slug, src_line,
+                                      std::move(math_ranges)});
             if (b->doc.doc_title.empty() && b->current_heading_level == 1) {
                 b->doc.doc_title = para.plain_text;
             }

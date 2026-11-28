@@ -133,11 +133,17 @@ struct Block {
 };
 
 struct OutlineEntry {
+    struct MathRange {
+        uint32_t start;
+        uint32_t length;
+    };
+
     int level = 1;
     int heading_id = 0;
     std::wstring title;
     std::string slug;
     int source_line = 0;
+    std::vector<MathRange> math_ranges;  // UTF-16 ranges in title
 };
 
 struct DocumentStats {

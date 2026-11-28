@@ -1789,6 +1789,7 @@ void MainWindow::RenderSidebar(
             }
         }
 
+        ComPtr<D2DTextRenderer> math_renderer;
         for (size_t i = 0; i < doc_.outline.size(); ++i) {
             const auto& entry = doc_.outline[i];
             float ry = list_rect.top + 6.0f + static_cast<float>(i) * kOutlineRowH - outline_scroll_y_;
@@ -1814,11 +1815,33 @@ void MainWindow::RenderSidebar(
             bool bold = is_active || (entry.level <= min_level);
 
             if (auto tl = MakeUiText(dw, entry.title, fsize, bold, tw, DWRITE_TEXT_ALIGNMENT_LEADING, true)) {
+                const auto color = is_active ? t.accent : (entry.level <= min_level + 1 ? t.text_primary : t.text_secondary);
+                bool has_math = false;
+                for (const auto& range : entry.math_ranges) {
+                    auto render = MathEngine::Instance().GetOrParse(entry.title.substr(range.start, range.length), false);
+                    if (!render) continue;
+                    float size = fsize * 1.10f;
+                    render->setTextSize(size);
+                    const float max_height = kOutlineRowH - 9.0f;
+                    const float height = static_cast<float>(render->getHeight());
+                    if (height > max_height) size *= max_height / height;
+                    ComPtr<InlineMathObject> math(new InlineMathObject(std::move(render), size,
+                        tex::argb(color.a, color.r, color.g, color.b)));
+                    if (SUCCEEDED(tl->SetInlineObject(math.Get(), {range.start, range.length}))) has_math = true;
+                }
                 DWRITE_TEXT_METRICS tm{};
                 tl->GetMetrics(&tm);
                 float ty = row_r.top + ((row_r.bottom - row_r.top) - tm.height) * 0.5f;
-                brush->SetColor(is_active ? t.accent : (entry.level <= min_level + 1 ? t.text_primary : t.text_secondary));
-                dc->DrawTextLayout(D2D1::Point2F(tx, ty), tl.Get(), brush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+                if (has_math) {
+                    if (!math_renderer) math_renderer = ComPtr<D2DTextRenderer>(new D2DTextRenderer(dc, color));
+                    math_renderer->SetDefaultColor(color);
+                    dc->PushAxisAlignedClip(row_r, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                    tl->Draw(dc, math_renderer.Get(), tx, ty);
+                    dc->PopAxisAlignedClip();
+                } else {
+                    brush->SetColor(color);
+                    dc->DrawTextLayout(D2D1::Point2F(tx, ty), tl.Get(), brush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+                }
             }
         }
     }

@@ -30,6 +30,23 @@ static void TestMarkdownOutlineAndSlugs() {
     assert(doc.outline[3].level == 2 && doc.outline[3].title == L"中文标题 测试");
 }
 
+static void TestOutlineMathRanges() {
+    const auto doc = ParseMarkdownDocument(R"(# Before $x^2$ and `$literal$` then \(\frac{1}{y}\) after
+## Plain heading
+)", L"outline.md");
+    assert(doc.outline.size() == 2);
+    const auto& entry = doc.outline[0];
+    assert(entry.title == LR"(Before x^2 and $literal$ then \frac{1}{y} after)");
+    assert(doc.doc_title == L"outline.md" && entry.title == doc.blocks[0].inline_content.plain_text);
+    assert(entry.heading_id == doc.blocks[0].heading_id && entry.source_line == 0);
+    assert(entry.slug == doc.blocks[0].slug);
+    assert(entry.math_ranges.size() == 2);
+    assert(entry.math_ranges[0].start == 7 && entry.math_ranges[0].length == 3);
+    assert(entry.math_ranges[1].start == entry.title.find(L'\\'));
+    assert(entry.title.substr(entry.math_ranges[1].start, entry.math_ranges[1].length) == LR"(\frac{1}{y})");
+    assert(doc.outline[1].math_ranges.empty());
+}
+
 static void TestInlineAndDisplayMath() {
     const std::string md = R"(
 Inline $E = mc^2$ and \(a^2 + b^2 = c^2\) inside text.
@@ -311,6 +328,7 @@ static void TestSourceEditorUndoRedoAndFind() {
 
 int main() {
     TestMarkdownOutlineAndSlugs();
+    TestOutlineMathRanges();
     TestInlineAndDisplayMath();
     TestConsecutiveCodeFences();
     TestImagesTablesAndAdmonitions();
