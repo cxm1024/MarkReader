@@ -181,9 +181,18 @@ struct ScrollAnchor {
     float offset_y = 0.0f;
 };
 
+struct HorizontalLayoutMetrics {
+    float scale = 1.0f;
+    float content_width = 760.0f;
+    float content_left = 0.0f;
+};
+
 // Lays out an entire MarkdownDocument into GPU-ready DirectWrite / Direct2D primitives.
 class DocumentLayout {
 public:
+    static HorizontalLayoutMetrics ComputeHorizontalMetrics(
+        float viewport_width, int zoom_percent, bool sidebar_visible);
+
     void Build(
         const MarkdownDocument& doc,
         float viewport_width,
@@ -191,6 +200,9 @@ public:
         bool sidebar_visible,
         const ThemePalette& theme,
         ImageCache& images);
+
+    bool TryShiftViewport(float viewport_width, int zoom_percent, bool sidebar_visible);
+    void ShiftHorizontal(float dx);
 
     void Render(
         ID2D1DeviceContext5* dc,
@@ -282,6 +294,9 @@ private:
     float content_left_ = 0.0f;
     float content_width_ = 760.0f;
     float scale_ = 1.0f;
+    bool has_built_layout_ = false;
+    int built_zoom_percent_ = 100;
+    bool built_sidebar_visible_ = true;
 };
 
 }  // namespace mr

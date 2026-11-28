@@ -262,6 +262,7 @@ void DocumentLayout::Build(
     headings_.clear();
     anchor_map_.clear();
     line_anchors_.clear();
+    has_built_layout_ = false;
 
     auto* d2d = D2DContext::Instance();
     if (!d2d || !d2d->DWrite()) {
@@ -269,13 +270,14 @@ void DocumentLayout::Build(
         return;
     }
 
-    scale_ = static_cast<float>(std::clamp(zoom_percent, 50, 250)) / 100.0f;
+    const HorizontalLayoutMetrics metrics = ComputeHorizontalMetrics(viewport_width, zoom_percent, sidebar_visible);
+    scale_ = metrics.scale;
     const float body_size = 16.0f * scale_;
-    const float h_margin = std::clamp(viewport_width * 0.055f, 24.0f, 68.0f);
-    const float base_measure = sidebar_visible ? 780.0f : 1040.0f;
-    const float max_measure = std::clamp(base_measure + (scale_ - 1.0f) * 260.0f, 640.0f, 1340.0f);
-    content_width_ = std::max(240.0f, std::min(viewport_width - 2.0f * h_margin, max_measure));
-    content_left_ = std::max(h_margin, (viewport_width - content_width_) * 0.5f);
+    content_width_ = metrics.content_width;
+    content_left_ = metrics.content_left;
+    has_built_layout_ = true;
+    built_zoom_percent_ = zoom_percent;
+    built_sidebar_visible_ = sidebar_visible;
 
     LayoutContext ctx;
     ctx.doc = &doc;
@@ -2000,6 +2002,79 @@ bool DocumentLayout::ScrollTableBy(int table_idx, float dx) {
     float old = tbl.scroll_x;
     tbl.scroll_x = std::clamp(tbl.scroll_x + dx, 0.0f, tbl.max_scroll_x);
     return std::abs(tbl.scroll_x - old) > 0.1f;
+}
+
+HorizontalLayoutMetrics DocumentLayout::ComputeHorizontalMetrics(
+    float viewport_width, int zoom_percent, bool sidebar_visible) {
+    HorizontalLayoutMetrics m;
+    m.scale = static_cast<float>(std::clamp(zoom_percent, 50, 250)) / 100.0f;
+    const float h_margin = std::clamp(viewport_width * 0.055f, 24.0f, 68.0f);
+    const float base_measure = sidebar_visible ? 780.0f : 1040.0f;
+    const float max_measure = std::clamp(base_measure + (m.scale - 1.0f) * 260.0f, 640.0f, 1340.0f);
+    m.content_width = std::max(240.0f, std::min(viewport_width - 2.0f * h_margin, max_measure));
+    m.content_left = std::max(h_margin, (viewport_width - m.content_width) * 0.5f);
+    return m;
+}
+
+void DocumentLayout::ShiftHorizontal(float dx) {
+    if (std::abs(dx) < 1e-4f) return;
+    auto shift_rect = [dx](D2D1_RECT_F& r) {
+        r.left += dx;
+        r.right += dx;
+    };
+    for (auto& d : decor_behind_) shift_rect(d.rect);
+    for (auto& d : decor_front_) shift_rect(d.rect);
+    for (auto& rt : rich_items_) {
+        shift_rect(rt.rect);
+        if (rt.table_idx >= 0) shift_rect(rt.cell_clip);
+    }
+    for (auto& cb : code_blocks_) {
+        shift_rect(cb.card_rect);
+        shift_rect(cb.header_rect);
+        shift_rect(cb.copy_btn_rect);
+        shift_rect(cb.body_rect);
+        if (cb.max_scroll_x > 1.0f) {
+            shift_rect(cb.hscroll_track_rect);
+            shift_rect(cb.hscroll_thumb_rect);
+        }
+    }
+    for (auto& mb : math_blocks_) {
+        shift_rect(mb.card_rect);
+        shift_rect(mb.copy_btn_rect);
+    }
+    for (auto& img : image_items_) {
+        shift_rect(img.card_rect);
+        shift_rect(img.img_rect);
+        if (img.caption_layout) shift_rect(img.caption_rect);
+    }
+    for (auto& tbl : table_items_) {
+        shift_rect(tbl.card_rect);
+        shift_rect(tbl.body_rect);
+        if (tbl.max_scroll_x > 1.0f) {
+            shift_rect(tbl.hscroll_track_rect);
+            shift_rect(tbl.hscroll_thumb_rect);
+        }
+        for (auto& row : tbl.rows) {
+            shift_rect(row.rect);
+        }
+    }
+    content_left_ += dx;
+}
+
+bool DocumentLayout::TryShiftViewport(float viewport_width, int zoom_percent, bool sidebar_visible) {
+    if (!has_built_layout_ ||
+        zoom_percent != built_zoom_percent_ ||
+        sidebar_visible != built_sidebar_visible_) {
+        return false;
+    }
+    const HorizontalLayoutMetrics metrics =
+        ComputeHorizontalMetrics(viewport_width, zoom_percent, sidebar_visible);
+    if (std::abs(metrics.content_width - content_width_) > 0.01f) {
+        return false;
+    }
+    ShiftHorizontal(metrics.content_left - content_left_);
+    content_left_ = metrics.content_left;
+    return true;
 }
 
 }  // namespace mr

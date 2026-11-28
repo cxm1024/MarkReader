@@ -187,6 +187,7 @@ add_executable(markreader_tests
     src/render/text_renderer.cpp
     src/render/image_loader.cpp
     src/render/d2d_context.cpp
+    src/render/doc_layout.cpp
     src/math/d2d_tex_backend.cpp
 )
 target_include_directories(markreader_tests PRIVATE src)

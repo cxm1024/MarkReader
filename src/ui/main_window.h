@@ -68,6 +68,9 @@ private:
 
     void QueueResize();
     bool ApplyResize();
+    bool TryShiftViewportLayout();
+    void ApplySplitterLayout();
+    void FinishSplitterDrag(bool save_config);
     void OnDpiChanged(UINT new_dpi, const RECT* suggested_rect);
     void OnMouseMove(float x_dip, float y_dip, WPARAM wp);
     void OnLButtonDown(float x_dip, float y_dip, WPARAM wp);
@@ -124,6 +127,7 @@ private:
     bool dwm_maximized_ = false;
     bool in_size_move_ = false;
     bool resize_pending_ = false;
+    bool splitter_layout_pending_ = false;
     bool resize_timer_active_ = false;
     float client_w_dip_ = 1240.0f;
     float client_h_dip_ = 840.0f;

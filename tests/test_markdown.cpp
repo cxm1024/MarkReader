@@ -5,9 +5,13 @@
 #include "core/sample_doc.h"
 #include "core/syntax_hl.h"
 #include "core/types.h"
+#include "render/d2d_context.h"
+#include "render/doc_layout.h"
 #include "ui/source_editor.h"
 
+#include <windows.h>
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
@@ -326,6 +330,110 @@ static void TestSourceEditorUndoRedoAndFind() {
     assert(matches[0].line == 1 && matches[0].start == 0 && matches[0].length == 3);
 }
 
+static void TestDocumentLayoutHorizontalShift() {
+    // Pure metric checks across desktop-wide vs narrow viewports.
+    const auto wide_a = DocumentLayout::ComputeHorizontalMetrics(1040.0f, 100, true);
+    const auto wide_b = DocumentLayout::ComputeHorizontalMetrics(960.0f, 100, true);
+    assert(std::abs(wide_a.content_width - 780.0f) < 0.01f);
+    assert(std::abs(wide_a.content_width - wide_b.content_width) < 0.01f);
+    assert(std::abs((wide_a.content_left - wide_b.content_left) - 40.0f) < 0.01f);
+
+    const auto narrow_a = DocumentLayout::ComputeHorizontalMetrics(760.0f, 100, true);
+    const auto narrow_b = DocumentLayout::ComputeHorizontalMetrics(700.0f, 100, true);
+    assert(narrow_b.content_width < narrow_a.content_width - 1.0f);
+
+    HWND hwnd = CreateWindowExW(
+        0, L"STATIC", L"MarkReaderLayoutTest", WS_POPUP,
+        0, 0, 128, 128, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (!hwnd) return;
+
+    D2DContext d2d;
+    if (d2d.Initialize(hwnd, 128, 128, 96.0f)) {
+        ImageCache images;
+        const auto& theme = GetThemePalette(ThemeMode::Light);
+        const std::string rich_md = R"(
+# Top Heading
+
+Paragraph with [a link](https://example.com) and inline $E=mc^2$ math.
+
+> Blockquote line
+
+> [!NOTE]
+> Admonition text
+
+- [x] Done task
+- Bullet one
+
+```cpp
+// Long unbreakable code line to force horizontal scroll bar metrics in the block
+int very_long_identifier_name_that_exceeds_width = 123456789 + 987654321 + 111111111 + 222222222 + 333333333;
+```
+
+$$
+\int_0^1 x^2\,dx = \frac{1}{3}
+$$
+
+| Col1 | Col2 |
+| --- | --- |
+| Left cell [ref](#top-heading) | Right cell |
+)";
+        auto doc = ParseMarkdownDocument(rich_md, L"shift_test.md");
+
+        DocumentLayout shifted;
+        shifted.Build(doc, 1040.0f, 100, true, theme, images);
+        const float orig_left = shifted.ContentLeft();
+        assert(shifted.TryShiftViewport(960.0f, 100, true));
+        assert(std::abs((orig_left - shifted.ContentLeft()) - 40.0f) < 0.01f);
+
+        DocumentLayout reference;
+        reference.Build(doc, 960.0f, 100, true, theme, images);
+
+        assert(std::abs(shifted.ContentLeft() - reference.ContentLeft()) < 0.01f);
+        assert(std::abs(shifted.ContentWidth() - reference.ContentWidth()) < 0.01f);
+        assert(std::abs(shifted.TotalHeight() - reference.TotalHeight()) < 0.01f);
+        assert(shifted.CodeBlocks().size() == reference.CodeBlocks().size());
+        assert(shifted.MathBlocks().size() == reference.MathBlocks().size());
+        assert(shifted.Tables().size() == reference.Tables().size());
+
+        auto eq_rect = [](const D2D1_RECT_F& a, const D2D1_RECT_F& b) {
+            return std::abs(a.left - b.left) < 0.05f &&
+                   std::abs(a.top - b.top) < 0.05f &&
+                   std::abs(a.right - b.right) < 0.05f &&
+                   std::abs(a.bottom - b.bottom) < 0.05f;
+        };
+        assert(eq_rect(shifted.CodeBlocks()[0].copy_btn_rect, reference.CodeBlocks()[0].copy_btn_rect));
+        assert(eq_rect(shifted.CodeBlocks()[0].body_rect, reference.CodeBlocks()[0].body_rect));
+        assert(eq_rect(shifted.MathBlocks()[0].card_rect, reference.MathBlocks()[0].card_rect));
+        assert(eq_rect(shifted.MathBlocks()[0].copy_btn_rect, reference.MathBlocks()[0].copy_btn_rect));
+        assert(eq_rect(shifted.Tables()[0].body_rect, reference.Tables()[0].body_rect));
+        assert(eq_rect(shifted.Tables()[0].rows[0].rect, reference.Tables()[0].rows[0].rect));
+
+        // HitTest on shifted copy-code button and table link must match reference build.
+        const auto& btn = reference.CodeBlocks()[0].copy_btn_rect;
+        const float bx = (btn.left + btn.right) * 0.5f;
+        const float by = (btn.top + btn.bottom) * 0.5f;
+        const auto hit_s = shifted.HitTest(bx, by);
+        const auto hit_r = reference.HitTest(bx, by);
+        assert(hit_s.target == HitTestResult::Target::CopyCodeBtn && hit_r.target == hit_s.target);
+
+        const auto& tbl = reference.Tables()[0];
+        const float lx = tbl.body_rect.left + 80.0f;
+        const float ly = tbl.rows[1].rect.top + 16.0f;
+        const auto tbl_hit_s = shifted.HitTest(lx, ly);
+        const auto tbl_hit_r = reference.HitTest(lx, ly);
+        assert(tbl_hit_s.target == tbl_hit_r.target);
+        assert(tbl_hit_s.url == tbl_hit_r.url);
+
+        // Parameter changes that alter measure or zoom/sidebar must fall back cleanly.
+        assert(!shifted.TryShiftViewport(760.0f, 100, true));
+        assert(!shifted.TryShiftViewport(960.0f, 110, true));
+        assert(!shifted.TryShiftViewport(960.0f, 100, false));
+
+        MathEngine::Instance().Shutdown();
+    }
+    DestroyWindow(hwnd);
+}
+
 int main() {
     TestMarkdownOutlineAndSlugs();
     TestOutlineMathRanges();
@@ -337,6 +445,7 @@ int main() {
     TestSourceLinesAndSaveRoundtrip();
     TestMarkdownSourceHighlighter();
     TestSourceEditorUndoRedoAndFind();
+    TestDocumentLayoutHorizontalShift();
     std::cout << "All MarkReader unit tests passed.\n";
     return 0;
 }

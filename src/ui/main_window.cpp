@@ -530,7 +530,10 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             PAINTSTRUCT ps{};
             BeginPaint(hwnd_, &ps);
             if (!IsIconic(hwnd_) && !resize_timer_active_) {
-                if (!resize_pending_ || ApplyResize()) Render();
+                bool ok = true;
+                if (resize_pending_) ok = ApplyResize();
+                if (ok && splitter_layout_pending_) ApplySplitterLayout();
+                if (ok) Render();
             }
             EndPaint(hwnd_, &ps);
             return 0;
@@ -623,6 +626,10 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         case WM_KILLFOCUS:
         case WM_CANCELMODE: {
             if (autoscroll_active_) StopAutoScroll();
+            if (dragging_splitter_) {
+                FinishSplitterDrag(true);
+                if (GetCapture() == hwnd_) ReleaseCapture();
+            }
             break;
         }
 
@@ -631,6 +638,9 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                 autoscroll_active_ = false;
                 KillTimer(hwnd_, kTimerAutoScroll);
                 InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            if (dragging_splitter_ && reinterpret_cast<HWND>(lp) != hwnd_) {
+                FinishSplitterDrag(true);
             }
             break;
         }
@@ -1057,6 +1067,7 @@ void MainWindow::UpdateWindowTitle() {
 }
 
 void MainWindow::RebuildLayout(bool preserve_anchor) {
+    splitter_layout_pending_ = false;
     if (autoscroll_active_) StopAutoScroll();
     dragging_hscroll_kind_ = HScrollKind::None;
     hovered_hscroll_kind_ = HScrollKind::None;
@@ -2058,7 +2069,9 @@ bool MainWindow::ApplyResize() {
     client_h_dip_ = PxToDip(static_cast<int>(height_px));
 
     if (client_w_dip_ != old_width || dpi_ != old_dpi) {
-        RebuildLayout(true);
+        if (dpi_ != old_dpi || !TryShiftViewportLayout()) {
+            RebuildLayout(true);
+        }
     } else {
         const float max_scroll = MaxDocScrollY();
         scroll_y_ = std::clamp(scroll_y_, 0.0f, max_scroll);
@@ -2067,6 +2080,40 @@ bool MainWindow::ApplyResize() {
     outline_scroll_y_ = std::clamp(outline_scroll_y_, 0.0f, MaxOutlineScrollY());
     UpdateImePosition();
     return true;
+}
+
+bool MainWindow::TryShiftViewportLayout() {
+    if (edit_mode_ || splitter_layout_pending_) return false;
+    D2D1_RECT_F tb{}, sb{}, sp{}, vp{}, vs{};
+    ComputeRegions(tb, sb, sp, vp, vs);
+    const float vp_w = std::max(240.0f, vp.right - vp.left);
+    const bool sb_vis = (sb.right > sb.left);
+    return layout_.TryShiftViewport(vp_w, config_.zoom_percent, sb_vis);
+}
+
+void MainWindow::ApplySplitterLayout() {
+    splitter_layout_pending_ = false;
+    if (dragging_splitter_) {
+        resize_timer_active_ = SetTimer(hwnd_, kTimerResize, kResizeIntervalMs, nullptr) != 0;
+    }
+    RebuildLayout(true);
+    UpdateImePosition();
+}
+
+void MainWindow::FinishSplitterDrag(bool save_config) {
+    if (!dragging_splitter_) return;
+    dragging_splitter_ = false;
+    if (!in_size_move_) {
+        KillTimer(hwnd_, kTimerResize);
+        resize_timer_active_ = false;
+    }
+    if (splitter_layout_pending_) {
+        ApplySplitterLayout();
+    }
+    if (save_config) {
+        SaveAppConfig(config_);
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void MainWindow::OnDpiChanged(UINT new_dpi, const RECT* suggested_rect) {
@@ -2091,11 +2138,20 @@ void MainWindow::OnMouseMove(float x_dip, float y_dip, WPARAM wp) {
     ComputeRegions(tb, sb, sp, vp, vs);
 
     if (dragging_splitter_) {
-        config_.outline_width = std::clamp(x_dip, 180.0f, std::min(440.0f, client_w_dip_ * 0.42f));
-        RebuildLayout(true);
-        UpdateImePosition();
+        const float new_w = std::clamp(x_dip, 180.0f, std::min(440.0f, client_w_dip_ * 0.42f));
+        if (std::abs(new_w - config_.outline_width) > 0.25f) {
+            config_.outline_width = new_w;
+            if (TryShiftViewportLayout()) {
+                UpdateImePosition();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            } else {
+                // Coalesce narrow-viewport or edit-mode wraps onto the throttled paint pass
+                // instead of blocking WM_MOUSEMOVE synchronously on every pixel.
+                splitter_layout_pending_ = true;
+                if (!resize_timer_active_) InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+        }
         SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
-        InvalidateRect(hwnd_, nullptr, FALSE);
         return;
     }
 
@@ -2561,8 +2617,7 @@ void MainWindow::OnLButtonDblClick(float x_dip, float y_dip) {
 void MainWindow::OnLButtonUp(float x_dip, float y_dip) {
     bool was_selecting = dragging_selection_;
     if (dragging_splitter_) {
-        dragging_splitter_ = false;
-        SaveAppConfig(config_);
+        FinishSplitterDrag(true);
     }
     if (edit_mode_) {
         editor_.OnLButtonUp();
