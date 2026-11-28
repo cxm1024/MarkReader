@@ -157,7 +157,7 @@ inline void RegisterAppAndUninstall(
     const std::wstring uninst_key = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MarkReader";
 
     RegSetSz(root, uninst_key, L"DisplayName", L"MarkReader");
-    RegSetSz(root, uninst_key, L"DisplayVersion", L"1.1.3");
+    RegSetSz(root, uninst_key, L"DisplayVersion", L"1.1.4");
     RegSetSz(root, uninst_key, L"Publisher", L"MarkReader");
     RegSetSz(root, uninst_key, L"DisplayIcon", app_exe + L",0");
     RegSetSz(root, uninst_key, L"InstallLocation", install_dir);
