@@ -121,6 +121,7 @@ private:
     HIMC saved_himc_ = nullptr;
 
     float dpi_ = 96.0f;
+    bool dwm_maximized_ = false;
     bool in_size_move_ = false;
     bool resize_pending_ = false;
     bool resize_timer_active_ = false;

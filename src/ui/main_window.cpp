@@ -439,19 +439,8 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, const std::wstring& initi
 
     SetTimer(hwnd_, kTimerWatch, 800, nullptr);
 
-    // Avoid DWM's opening stretch on the custom frame when starting maximized.
-    BOOL disable_transitions = TRUE;
-    const bool restore_transitions = nCmdShow == SW_SHOWMAXIMIZED && SUCCEEDED(
-        DwmSetWindowAttribute(hwnd_, DWMWA_TRANSITIONS_FORCEDISABLED,
-                              &disable_transitions, sizeof(disable_transitions)));
     ShowWindow(hwnd_, nCmdShow);
     UpdateWindow(hwnd_);
-    if (restore_transitions) {
-        DwmFlush();  // Wait for the first frame before enabling subsequent transitions.
-        disable_transitions = FALSE;
-        DwmSetWindowAttribute(hwnd_, DWMWA_TRANSITIONS_FORCEDISABLED,
-                              &disable_transitions, sizeof(disable_transitions));
-    }
     return true;
 }
 
@@ -559,7 +548,10 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
 
         case WM_SIZE: {
-            if (wp != SIZE_MINIMIZED) QueueResize();
+            if (wp != SIZE_MINIMIZED) {
+                if (!!IsZoomed(hwnd_) != dwm_maximized_) UpdateDwmAppearance();
+                QueueResize();
+            }
             return 0;
         }
 
@@ -854,8 +846,15 @@ void MainWindow::UpdateDwmAppearance() {
     BOOL dark = t.is_dark ? TRUE : FALSE;
     DwmSetWindowAttribute(hwnd_, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
 
-    MARGINS m{0, 0, 0, 1};
-    DwmExtendFrameIntoClientArea(hwnd_, &m);
+    // DWM's non-client rendering stretches the custom frame during maximized startup.
+    // Disable only that rendering, not transitions, and restore the normal frame on restore.
+    dwm_maximized_ = IsZoomed(hwnd_) != FALSE;
+    const DWMNCRENDERINGPOLICY policy = dwm_maximized_ ? DWMNCRP_DISABLED : DWMNCRP_USEWINDOWSTYLE;
+    DwmSetWindowAttribute(hwnd_, DWMWA_NCRENDERING_POLICY, &policy, sizeof(policy));
+    if (!dwm_maximized_) {
+        const MARGINS m{0, 0, 0, 1};
+        DwmExtendFrameIntoClientArea(hwnd_, &m);
+    }
 }
 
 LRESULT MainWindow::OnNcHitTest(POINT screen_pt) const {
