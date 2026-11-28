@@ -675,12 +675,12 @@ LRESULT CALLBACK SetupWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SelectObject(hdc, s->font_sub);
             SetTextColor(hdc, RGB(100, 116, 139));
             RECT sr{Dip(s, 88), Dip(s, 48), rc.right - Dip(s, 20), Dip(s, 72)};
-            std::wstring sub_txt = L"轻量原生 Markdown 阅读器 v1.1.4 · 支持公式、代码块、图片与微调";
+            std::wstring sub_txt = L"轻量原生 Markdown 阅读器 v1.1.5 · 支持公式、代码块、图片与微调";
             if (s->opts.is_upgrade && !s->finished) {
                 if (!s->opts.existing_version.empty()) {
-                    sub_txt = L"检测到已安装 v" + s->opts.existing_version + L" · 即将就地升级至 v1.1.4";
+                    sub_txt = L"检测到已安装 v" + s->opts.existing_version + L" · 即将就地升级至 v1.1.5";
                 } else {
-                    sub_txt = L"检测到已安装旧版本 · 即将就地更新至 v1.1.4";
+                    sub_txt = L"检测到已安装旧版本 · 即将就地更新至 v1.1.5";
                 }
             }
             DrawTextW(hdc, sub_txt.c_str(), -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
